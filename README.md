@@ -66,33 +66,6 @@ The bucket must already have:
 }
 ```
 
-sample cfg:
-
-```xml
-  <?xml version="1.0" encoding="UTF-8"?>
-  <CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-    <CORSRule>
-      <ID>S3Drive</ID>
-      <AllowedOrigin>*</AllowedOrigin>
-      <AllowedOrigin>https://web.s3drive.app</AllowedOrigin>
-      <AllowedOrigin>https://s3.amazonaws.com</AllowedOrigin>
-      <AllowedOrigin>https://collov-nexus.s3.us-west-1.amazonaws.com</AllowedOrigin>
-      <AllowedOrigin>https://collov-nexus.s3.dualstack.us-west-1.amazonaws.com</AllowedOrigin>
-      <AllowedMethod>GET</AllowedMethod>
-      <AllowedMethod>HEAD</AllowedMethod>
-      <AllowedMethod>POST</AllowedMethod>
-      <AllowedMethod>PUT</AllowedMethod>
-      <AllowedMethod>DELETE</AllowedMethod>
-      <MaxAgeSeconds>3600</MaxAgeSeconds>
-      <ExposeHeader>etag</ExposeHeader>
-      <ExposeHeader>x-amz-version-id</ExposeHeader>
-      <ExposeHeader>x-amz-version-id</ExposeHeader>
-      <ExposeHeader>x-amz-meta-mtime</ExposeHeader>
-      <AllowedHeader>*</AllowedHeader>
-    </CORSRule>
-  </CORSConfiguration>
-```
-
 - A **CORS configuration** (required when the app is served from the S3
   website endpoint or a CDN, so the SDK can call the S3 REST API):
 
