@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <CORSRule>
+    <ID>S3Drive-Gallery-Fix</ID>
+    <AllowedOrigin>*</AllowedOrigin>
+    <AllowedOrigin>https://web.s3drive.app</AllowedOrigin>
+    <AllowedOrigin>https://bucket.s3.us-west-1.amazonaws.com</AllowedOrigin>
+    <AllowedOrigin>https://bucket.s3.dualstack.us-west-1.amazonaws.com</AllowedOrigin>
+
+    <AllowedMethod>GET</AllowedMethod>
+    <AllowedMethod>HEAD</AllowedMethod>
+    <AllowedMethod>POST</AllowedMethod>
+    <AllowedMethod>PUT</AllowedMethod>
+
+    <AllowedHeader>*</AllowedHeader>
+
+    <!-- CRITICAL: These allow your JS to read file size and range data -->
+    <ExposeHeader>ETag</ExposeHeader>
+    <ExposeHeader>Content-Length</ExposeHeader>
+    <ExposeHeader>Content-Range</ExposeHeader>
+    <ExposeHeader>Accept-Ranges</ExposeHeader>
+    <ExposeHeader>x-amz-meta-width</ExposeHeader>
+    <ExposeHeader>x-amz-meta-height</ExposeHeader>
+
+    <MaxAgeSeconds>3600</MaxAgeSeconds>
+  </CORSRule>
+</CORSConfiguration>
