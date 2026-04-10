@@ -5,14 +5,77 @@ import "swiper/css";
 import { getImageUrl } from "../s3.js";
 
 /**
+ * Fetches one lightbox image as a Blob URL and revokes it on unmount.
+ *
+ * Why blobs instead of direct S3 URLs:
+ *   Mobile browsers keep decoded bitmaps resident in their image cache keyed
+ *   on the URL, even after the <img> element is removed from the DOM. After
+ *   200-300 full-resolution images the accumulated decoded memory (≈ 4 MB per
+ *   image) causes GC pressure and jank. Revoking a blob:// URL is an explicit
+ *   signal to the browser that the underlying data can be freed immediately.
+ *
+ *   Because Swiper's Virtual module unmounts slides that leave its render
+ *   window, React's cleanup runs the revoke for every slide that scrolls out
+ *   of view — keeping live decoded memory bounded to ≈ 5 slides at all times.
+ */
+function SlideImage({ imageKey, alt, onDims }) {
+  const [blobUrl, setBlobUrl] = useState(null);
+  const urlRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch(getImageUrl(imageKey))
+      .then((r) => r.blob())
+      .then((blob) => {
+        if (cancelled) return;
+        const url = URL.createObjectURL(blob);
+        urlRef.current = url;
+        setBlobUrl(url);
+      })
+      .catch(() => {
+        // Network error — fall back to the direct URL so the image still shows.
+        if (!cancelled) setBlobUrl(getImageUrl(imageKey));
+      });
+
+    return () => {
+      cancelled = true;
+      if (urlRef.current) {
+        URL.revokeObjectURL(urlRef.current);
+        urlRef.current = null;
+      }
+    };
+  }, [imageKey]);
+
+  if (!blobUrl) {
+    return <div className="lb-slide-loading" />;
+  }
+
+  return (
+    <img
+      src={blobUrl}
+      alt={alt}
+      className="lb-img"
+      decoding="async"
+      onLoad={(e) => {
+        const w = e.target.naturalWidth;
+        const h = e.target.naturalHeight;
+        if (w && h) onDims(w, h);
+      }}
+    />
+  );
+}
+
+/**
  * Full-screen image viewer with prev/next navigation, keyboard support,
  * and touch swipe gestures via Swiper.js:
  *   swipe left  (right→left) → next image
  *   swipe right (left→right) → previous image
  *   swipe up    (down→up)    → close
  *
- * Uses Swiper's Virtual module so only ~5 slides are ever in the DOM,
- * keeping memory usage constant regardless of total image count.
+ * Uses Swiper's Virtual module so only ~5 slides are ever in the DOM.
+ * Each slide loads its image as a Blob URL (see SlideImage above) so
+ * decoded memory is freed as soon as a slide leaves the virtual window.
  *
  * Props:
  *   images        — array of { key, lastModified, size }
@@ -144,13 +207,13 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
         )}
 
         {/*
-          Virtual module: only the current slide + `addSlidesAfter/Before` neighbors
-          are mounted in the DOM. With 300 images loaded only ~5 img elements exist
-          at any time, preventing the memory crash on mobile.
+          Virtual module: only currentIndex ± addSlidesAfter/Before neighbors
+          are mounted in the DOM. Each SlideImage fetches via blob URL and revokes
+          on unmount, so decoded image memory stays bounded to ~5 slides.
         */}
         <Swiper
           modules={[Virtual]}
-          virtual={{ addSlidesAfter: 1, addSlidesBefore: 1 }}
+          virtual={{ addSlidesAfter: 2, addSlidesBefore: 2 }}
           className="lb-swiper"
           initialSlide={currentIndex}
           spaceBetween={16}
@@ -165,17 +228,12 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
         >
           {images.map((img, idx) => (
             <SwiperSlide key={img.key} virtualIndex={idx}>
-              <img
-                src={getImageUrl(img.key)}
+              <SlideImage
+                imageKey={img.key}
                 alt={img.key.split("/").pop()}
-                className="lb-img"
-                onLoad={(e) => {
-                  const w = e.target.naturalWidth;
-                  const h = e.target.naturalHeight;
-                  if (w && h) {
-                    setDimsMap((prev) => ({ ...prev, [img.key]: { w, h } }));
-                  }
-                }}
+                onDims={(w, h) =>
+                  setDimsMap((prev) => ({ ...prev, [img.key]: { w, h } }))
+                }
               />
             </SwiperSlide>
           ))}
