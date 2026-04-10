@@ -433,6 +433,21 @@ code   { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
   .lb-next { right: 4px; }
 }
 
+/* Slide loading shimmer (shown while blob URL is being fetched) */
+.lb-slide-loading {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    rgba(255,255,255,0.04) 25%,
+    rgba(255,255,255,0.09) 50%,
+    rgba(255,255,255,0.04) 75%
+  );
+  background-size: 300% 100%;
+  animation: shimmer 1.6s infinite ease-in-out;
+  border-radius: 4px;
+}
+
 /* Swiper container */
 .lb-swiper {
   width: 90vw;
