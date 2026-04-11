@@ -205,10 +205,22 @@ function ImageTile({ image, onClick }) {
     const el = ref.current;
     if (!el) return;
 
-    let cancelled = false;
+    // Local status mirror used inside observer callbacks to avoid stale React
+    // state closures. React state (setStatus / setObjectUrl) is used only to
+    // drive rendering; this variable drives the load/unload logic.
+    let localStatus = "idle"; // "idle" | "loading" | "loaded" | "highres" | "error"
+    let cancelled   = false;
+
+    function revoke() {
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+    }
 
     async function load() {
-      if (cancelled) return;
+      if (cancelled || localStatus !== "idle") return;
+      localStatus = "loading";
       setStatus("loading");
 
       // ── 1. IndexedDB cache ──────────────────────────────────────────────────
@@ -218,12 +230,14 @@ function ImageTile({ image, onClick }) {
         const url = URL.createObjectURL(cached);
         blobUrlRef.current = url;
         setObjectUrl(url);
+        localStatus = "loaded";
         setStatus("loaded");
         return;
       }
 
       // ── 2. Size check (free — already in listing metadata) ─────────────────
       if (image.size > SIZE_LIMIT_BYTES) {
+        localStatus = "highres";
         setStatus("highres");
         return;
       }
@@ -247,6 +261,7 @@ function ImageTile({ image, onClick }) {
           if (cancelled) return;
           const dims = parseDimensions(buf);
           if (dims && (dims.width > MAX_PX_W || dims.height > MAX_PX_H)) {
+            localStatus = "highres";
             setStatus("highres");
             return;
           }
@@ -256,6 +271,7 @@ function ImageTile({ image, onClick }) {
           if (cancelled) return;
           const dims = parseDimensions(buf);
           if (dims && (dims.width > MAX_PX_W || dims.height > MAX_PX_H)) {
+            localStatus = "highres";
             setStatus("highres");
             return;
           }
@@ -277,29 +293,47 @@ function ImageTile({ image, onClick }) {
         const url = URL.createObjectURL(blob);
         blobUrlRef.current = url;
         setObjectUrl(url);
+        localStatus = "loaded";
         setStatus("loaded");
       } catch {
-        if (!cancelled) setStatus("error");
+        if (!cancelled) {
+          localStatus = "error";
+          setStatus("error");
+        }
       }
     }
 
-    const observer = new IntersectionObserver(
+    // Load observer — fires when tile enters the 200px pre-load zone.
+    // Stays connected permanently so it can re-trigger after an eviction.
+    const loadObserver = new IntersectionObserver(
       ([entry]) => {
-        if (!entry.isIntersecting) return;
-        observer.disconnect();
-        load();
+        if (entry.isIntersecting && localStatus === "idle") load();
       },
       { rootMargin: "200px" }
     );
-    observer.observe(el);
+
+    // Unload observer — fires when tile leaves the 2000px keep-alive zone.
+    // Only evicts blobs; highres/error tiles have nothing to free.
+    const unloadObserver = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting && localStatus === "loaded") {
+          revoke();
+          setObjectUrl(null);
+          localStatus = "idle";
+          setStatus("idle");
+        }
+      },
+      { rootMargin: "2000px" }
+    );
+
+    loadObserver.observe(el);
+    unloadObserver.observe(el);
 
     return () => {
       cancelled = true;
-      observer.disconnect();
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = null;
-      }
+      loadObserver.disconnect();
+      unloadObserver.disconnect();
+      revoke();
     };
   }, [image.key, image.size]);
 
