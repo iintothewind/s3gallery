@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { listObjects, getImageUrl } from "../s3.js";
 import { getCached, setCached } from "../imageCache.js";
 import { parseDimensions } from "../imageDimensions.js";
@@ -11,6 +11,53 @@ import Skeleton from "./Skeleton.jsx";
 const SIZE_LIMIT_BYTES = window.CONFIG.thumbnailMaxBytes  ?? 2 * 1024 * 1024;
 const MAX_PX_W         = window.CONFIG.thumbnailMaxWidth  ?? 2560;
 const MAX_PX_H         = window.CONFIG.thumbnailMaxHeight ?? 1440;
+
+// ─── Shared tile observers ────────────────────────────────────────────────────
+//
+// One IntersectionObserver is shared across ALL tiles instead of one per tile.
+// With 300 images rendered, this cuts active observer instances from 600+ to 2,
+// eliminating the per-scroll re-evaluation overhead that causes gradual slowdown.
+
+const _loadCbs   = new Map(); // element → (isIntersecting: bool) => void
+const _unloadCbs = new Map();
+
+const _sharedLoad = new IntersectionObserver(
+  (entries) => { for (const e of entries) _loadCbs.get(e.target)?.(e.isIntersecting); },
+  { rootMargin: "200px" }
+);
+const _sharedUnload = new IntersectionObserver(
+  (entries) => { for (const e of entries) _unloadCbs.get(e.target)?.(e.isIntersecting); },
+  { rootMargin: "2000px" }
+);
+
+const watchLoad   = (el, cb) => { _loadCbs.set(el, cb);   _sharedLoad.observe(el); };
+const watchUnload = (el, cb) => { _unloadCbs.set(el, cb); _sharedUnload.observe(el); };
+const stopLoad    = (el)     => { _loadCbs.delete(el);    _sharedLoad.unobserve(el); };
+const stopUnload  = (el)     => { _unloadCbs.delete(el);  _sharedUnload.unobserve(el); };
+
+// ─── Folder listing cache ─────────────────────────────────────────────────────
+//
+// Caches listObjects() results used by FolderTile previews (bounded LRU).
+// Prevents re-issuing S3 ListObjectsV2 for every subfolder tile when the user
+// navigates back to a parent folder they've already visited.
+
+const _listCache     = new Map(); // prefix → images[]  (insertion = LRU order)
+const LIST_CACHE_MAX = 60;
+
+function listCacheGet(prefix) {
+  if (!_listCache.has(prefix)) return null;
+  const images = _listCache.get(prefix);
+  _listCache.delete(prefix);   // re-insert as most-recently-used
+  _listCache.set(prefix, images);
+  return images;
+}
+
+function listCacheSet(prefix, images) {
+  if (_listCache.size >= LIST_CACHE_MAX) {
+    _listCache.delete(_listCache.keys().next().value); // evict oldest
+  }
+  _listCache.set(prefix, images);
+}
 
 // ─── Folder icon SVG ─────────────────────────────────────────────────────────
 
@@ -62,7 +109,7 @@ function HighResPlaceholder() {
 // ─── Folder thumbnail ─────────────────────────────────────────────────────────
 
 function FolderTile({ prefix, name, onClick }) {
-  // preview: null = not loaded, string = blob URL, false = no usable image
+  // preview: null = not loaded / evicted, string = blob URL
   const [preview, setPreview] = useState(null);
   const [count,   setCount]   = useState(null);
   const ref        = useRef(null);
@@ -72,13 +119,28 @@ function FolderTile({ prefix, name, onClick }) {
     const el = ref.current;
     if (!el) return;
 
-    let cancelled = false;
+    // Local status mirror — avoids stale React-state closures inside observers.
+    // "idle"       = not yet fetched (or evicted)
+    // "loading"    = listObjects / preview fetch in progress
+    // "loaded"     = blob URL is live and displayed
+    // "no-preview" = loaded but no suitable image found (nothing to evict)
+    let localStatus = "idle";
+    let cancelled   = false;
+
+    function revoke() {
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+    }
 
     async function loadPreview(images) {
       // Pick the first candidate that fits within the size limit.
-      // Only one range request is made — no looping through all images.
       const candidate = images.find((img) => img.size <= SIZE_LIMIT_BYTES);
-      if (!candidate) return; // all images too large — keep folder icon
+      if (!candidate) {
+        localStatus = "no-preview";
+        return;
+      }
 
       const imgUrl = getImageUrl(candidate.key);
       let fullBlob = null;
@@ -90,62 +152,82 @@ function FolderTile({ prefix, name, onClick }) {
         if (cancelled) return;
 
         if (resp.status === 200) {
-          // Server returned the full file — reuse it, no second download needed.
           fullBlob = await resp.blob();
           if (cancelled) return;
           const buf = await fullBlob.slice(0, 65536).arrayBuffer();
           if (cancelled) return;
           const dims = parseDimensions(buf);
-          if (dims && (dims.width > MAX_PX_W || dims.height > MAX_PX_H)) return; // too large
+          if (dims && (dims.width > MAX_PX_W || dims.height > MAX_PX_H)) {
+            localStatus = "no-preview";
+            return;
+          }
         } else {
-          // 206 Partial Content — check dims from the slice only.
           const buf = await resp.arrayBuffer();
           if (cancelled) return;
           const dims = parseDimensions(buf);
-          if (dims && (dims.width > MAX_PX_W || dims.height > MAX_PX_H)) return; // too large
+          if (dims && (dims.width > MAX_PX_W || dims.height > MAX_PX_H)) {
+            localStatus = "no-preview";
+            return;
+          }
         }
       } catch {
         if (cancelled) return;
-        // Range request failed — fall through to full download below.
       }
 
-      // Passed checks — download the full file if we don't have it yet.
       try {
         const blob = fullBlob ?? await fetch(imgUrl).then((r) => r.blob());
         if (cancelled) return;
         const url = URL.createObjectURL(blob);
         blobUrlRef.current = url;
         setPreview(url);
+        localStatus = "loaded";
       } catch {
-        // Network error — folder icon stays
+        if (!cancelled) localStatus = "no-preview";
       }
     }
 
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry.isIntersecting) return;
-        observer.disconnect();
+    function startLoad() {
+      localStatus = "loading";
 
-        listObjects(prefix)
-          .then(({ images }) => {
-            if (cancelled) return;
-            setCount(images.length);
-            loadPreview(images);
-          })
-          .catch(() => {
-            if (!cancelled) setCount(0);
-          });
-      },
-      { rootMargin: "200px" }
-    );
-    observer.observe(el);
+      // Serve from the listing cache when available — avoids re-issuing a
+      // ListObjectsV2 call every time the user navigates back to this folder.
+      const hit = listCacheGet(prefix);
+      if (hit) {
+        setCount(hit.length);
+        loadPreview(hit);
+        return;
+      }
+
+      listObjects(prefix)
+        .then(({ images }) => {
+          if (cancelled) return;
+          listCacheSet(prefix, images);
+          setCount(images.length);
+          loadPreview(images);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            localStatus = "no-preview";
+            setCount(0);
+          }
+        });
+    }
+
+    // Shared observers — no per-tile IntersectionObserver instances created.
+    watchLoad(el,   (on) => { if (on && localStatus === "idle") startLoad(); });
+    watchUnload(el, (on) => {
+      if (!on && localStatus === "loaded") {
+        revoke();
+        setPreview(null);
+        localStatus = "idle";
+      }
+    });
+
     return () => {
       cancelled = true;
-      observer.disconnect();
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = null;
-      }
+      stopLoad(el);
+      stopUnload(el);
+      revoke();
     };
   }, [prefix]);
 
@@ -287,8 +369,7 @@ function ImageTile({ image, onClick }) {
         const blob = cachedFullBlob ?? await fetch(imgUrl).then((r) => r.blob());
         if (cancelled) return;
 
-        await setCached(image.key, blob);
-        if (cancelled) return;
+        setCached(image.key, blob); // queued batch write — doesn't block display
 
         const url = URL.createObjectURL(blob);
         blobUrlRef.current = url;
@@ -303,36 +384,21 @@ function ImageTile({ image, onClick }) {
       }
     }
 
-    // Load observer — fires when tile enters the 200px pre-load zone.
-    // Stays connected permanently so it can re-trigger after an eviction.
-    const loadObserver = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting && localStatus === "idle") load();
-      },
-      { rootMargin: "200px" }
-    );
-
-    // Unload observer — fires when tile leaves the 2000px keep-alive zone.
-    // Only evicts blobs; highres/error tiles have nothing to free.
-    const unloadObserver = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry.isIntersecting && localStatus === "loaded") {
-          revoke();
-          setObjectUrl(null);
-          localStatus = "idle";
-          setStatus("idle");
-        }
-      },
-      { rootMargin: "2000px" }
-    );
-
-    loadObserver.observe(el);
-    unloadObserver.observe(el);
+    // Shared observers — no per-tile IntersectionObserver instances created.
+    watchLoad(el,   (on) => { if (on && localStatus === "idle") load(); });
+    watchUnload(el, (on) => {
+      if (!on && localStatus === "loaded") {
+        revoke();
+        setObjectUrl(null);
+        localStatus = "idle";
+        setStatus("idle");
+      }
+    });
 
     return () => {
       cancelled = true;
-      loadObserver.disconnect();
-      unloadObserver.disconnect();
+      stopLoad(el);
+      stopUnload(el);
       revoke();
     };
   }, [image.key, image.size]);
@@ -404,22 +470,28 @@ export default function Gallery({ prefix, onNavigate }) {
     return () => { cancelled = true; };
   }, [prefix]);
 
-  // Sort helpers
+  // Sort helpers — memoized so lightbox open/close doesn't re-sort 300 items.
   const getFolderName = (fp) => fp.replace(/\/$/, "").split("/").pop() ?? fp;
 
-  const sortedFolders = [...folders].sort((a, b) => {
-    const cmp = getFolderName(a).localeCompare(getFolderName(b));
-    return sortOrder === "desc" ? -cmp : cmp;
-  });
+  const sortedFolders = useMemo(() =>
+    [...folders].sort((a, b) => {
+      const cmp = getFolderName(a).localeCompare(getFolderName(b));
+      return sortOrder === "desc" ? -cmp : cmp;
+    }),
+    [folders, sortOrder] // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
-  const sortedImages = [...images].sort((a, b) => {
-    const cmp = sortBy === "date"
-      ? new Date(a.lastModified) - new Date(b.lastModified)
-      : a.key.localeCompare(b.key);
-    return sortOrder === "desc" ? -cmp : cmp;
-  });
+  const sortedImages = useMemo(() =>
+    [...images].sort((a, b) => {
+      const cmp = sortBy === "date"
+        ? new Date(a.lastModified) - new Date(b.lastModified)
+        : a.key.localeCompare(b.key);
+      return sortOrder === "desc" ? -cmp : cmp;
+    }),
+    [images, sortBy, sortOrder]
+  );
 
-  const visibleImages = sortedImages.slice(0, shown);
+  const visibleImages = useMemo(() => sortedImages.slice(0, shown), [sortedImages, shown]);
   const remaining     = sortedImages.length - shown;
 
   const handleFolderClick = useCallback(
