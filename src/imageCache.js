@@ -91,33 +91,61 @@ export async function getCached(key) {
   }
 }
 
-/**
- * Stores `blob` under `key` with the current timestamp.
- * Gracefully handles QuotaExceededError by skipping the write.
- */
-export async function setCached(key, blob) {
-  try {
-    const db = await openDB();
-    return new Promise((resolve) => {
-      let req;
+// ─── Batched write queue ──────────────────────────────────────────────────────
+//
+// setCached() used to open one readwrite transaction per image. IDB serialises
+// all readwrite transactions on the same store, so 300 simultaneous cache
+// writes (full folder first load) queued up and stalled each other, making
+// every subsequent image display slower. The queue collects writes that arrive
+// within the same 100 ms window and flushes them in a single transaction.
+
+const _writeQueue = new Map(); // key → blob
+let   _writeTimer = null;
+
+async function _flushWriteQueue() {
+  if (_writeQueue.size === 0) return;
+  const batch = [..._writeQueue.entries()];
+  _writeQueue.clear();
+
+  let db;
+  try { db = await openDB(); } catch { return; }
+
+  await new Promise((resolve) => {
+    let tx;
+    try { tx = db.transaction(STORE, "readwrite"); } catch { return resolve(); }
+
+    const ts = Date.now();
+    for (const [key, blob] of batch) {
       try {
-        req = db
-          .transaction(STORE, "readwrite")
-          .objectStore(STORE)
-          .put({ blob, timestamp: Date.now() }, key);
-      } catch {
-        return resolve(false);
-      }
-      req.onsuccess = () => resolve(true);
-      req.onerror   = (e) => {
-        if (e.target.error?.name === "QuotaExceededError") {
-          console.warn("[s3-gallery] IndexedDB quota exceeded — skipping cache write.");
+        tx.objectStore(STORE).put({ blob, timestamp: ts }, key);
+      } catch (e) {
+        if (e?.name === "QuotaExceededError") {
+          console.warn("[s3-gallery] IndexedDB quota exceeded — skipping cache writes.");
+          try { tx.abort(); } catch {}
+          return resolve();
         }
-        resolve(false);
-      };
-    });
-  } catch {
-    return false;
+      }
+    }
+
+    tx.oncomplete = resolve;
+    tx.onerror    = (e) => {
+      if (e.target?.error?.name === "QuotaExceededError") {
+        console.warn("[s3-gallery] IndexedDB quota exceeded — skipping cache writes.");
+      }
+      resolve();
+    };
+  });
+}
+
+/**
+ * Queues `blob` to be stored under `key`. Writes are batched into a single
+ * IDB transaction and flushed within 100 ms. Fire-and-forget — does not block
+ * the caller waiting for the write to commit.
+ */
+export function setCached(key, blob) {
+  _writeQueue.set(key, blob);
+  if (!_writeTimer) {
+    _writeTimer = setTimeout(() => { _writeTimer = null; _flushWriteQueue(); }, 100);
   }
 }
 
