@@ -23,23 +23,24 @@ function SlideImage({ imageKey, alt, onDims }) {
   const urlRef = useRef(null);
 
   useEffect(() => {
-    let cancelled = false;
+    const abort = new AbortController();
 
-    fetch(getImageUrl(imageKey))
+    fetch(getImageUrl(imageKey), { signal: abort.signal })
       .then((r) => r.blob())
       .then((blob) => {
-        if (cancelled) return;
         const url = URL.createObjectURL(blob);
         urlRef.current = url;
         setBlobUrl(url);
       })
-      .catch(() => {
-        // Network error — fall back to the direct URL so the image still shows.
-        if (!cancelled) setBlobUrl(getImageUrl(imageKey));
+      .catch((e) => {
+        // AbortError means the slide was unmounted — nothing to do.
+        if (e?.name === "AbortError") return;
+        // Other network error — fall back to the direct URL.
+        setBlobUrl(getImageUrl(imageKey));
       });
 
     return () => {
-      cancelled = true;
+      abort.abort();
       if (urlRef.current) {
         URL.revokeObjectURL(urlRef.current);
         urlRef.current = null;
@@ -213,7 +214,7 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
         */}
         <Swiper
           modules={[Virtual]}
-          virtual={{ addSlidesAfter: 2, addSlidesBefore: 2 }}
+          virtual={{ addSlidesAfter: 1, addSlidesBefore: 1 }}
           className="lb-swiper"
           initialSlide={currentIndex}
           spaceBetween={16}

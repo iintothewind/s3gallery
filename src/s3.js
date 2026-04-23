@@ -101,28 +101,3 @@ export async function listObjects(prefix) {
   return { folders, images };
 }
 
-/**
- * Finds the key of the first image anywhere under `prefix` (recursive, no
- * delimiter) — used to generate folder preview thumbnails.
- *
- * @param {string} prefix
- * @returns {string|null}
- */
-export async function getFirstImageInFolder(prefix) {
-  const client = getClient();
-  const { bucketName } = window.CONFIG;
-
-  const cmd = new ListObjectsV2Command({
-    Bucket: bucketName,
-    Prefix: prefix,
-    MaxKeys: 100, // enough to find at least one image
-  });
-
-  const resp = await client.send(cmd);
-
-  for (const obj of resp.Contents ?? []) {
-    if (obj.Key && isImage(obj.Key)) return obj.Key;
-  }
-
-  return null;
-}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import Gallery from "./components/Gallery.jsx";
 import Breadcrumb from "./components/Breadcrumb.jsx";
 import { cleanupOldEntries } from "./imageCache.js";
@@ -83,10 +83,10 @@ export default function App() {
     }
   }, []);
 
-  // Breadcrumb: split currentPath into parts, ignoring trailing /
-  const breadcrumbParts = currentPath
-    ? currentPath.replace(/\/$/, "").split("/").filter(Boolean)
-    : [];
+  const breadcrumbParts = useMemo(() =>
+    currentPath ? currentPath.replace(/\/$/, "").split("/").filter(Boolean) : [],
+    [currentPath]
+  );
 
   const s3Prefix = toS3Prefix(currentPath);
 

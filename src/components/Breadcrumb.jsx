@@ -1,4 +1,4 @@
-import React from "react";
+import { Fragment } from "react";
 
 /**
  * Clickable breadcrumb trail.
@@ -34,7 +34,7 @@ export default function Breadcrumb({ parts, onNavigate }) {
       {parts.map((part, idx) => {
         const isLast = idx === parts.length - 1;
         return (
-          <React.Fragment key={idx}>
+          <Fragment key={idx}>
             <span className="breadcrumb-sep" aria-hidden="true"> / </span>
             <span
               className={`breadcrumb-item${isLast ? " active" : ""}`}
@@ -45,7 +45,7 @@ export default function Breadcrumb({ parts, onNavigate }) {
             >
               {part}
             </span>
-          </React.Fragment>
+          </Fragment>
         );
       })}
     </nav>

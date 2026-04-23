@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from "react";
 import { listObjects, getImageUrl } from "../s3.js";
 import { getCached, setCached } from "../imageCache.js";
 import { parseDimensions } from "../imageDimensions.js";
@@ -59,6 +59,10 @@ function listCacheSet(prefix, images) {
   _listCache.set(prefix, images);
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const getFolderName = (fp) => fp.replace(/\/$/, "").split("/").pop() ?? fp;
+
 // ─── Folder icon SVG ─────────────────────────────────────────────────────────
 
 function FolderIcon() {
@@ -108,7 +112,7 @@ function HighResPlaceholder() {
 
 // ─── Folder thumbnail ─────────────────────────────────────────────────────────
 
-function FolderTile({ prefix, name, onClick }) {
+const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
   // preview: null = not loaded / evicted, string = blob URL
   const [preview, setPreview] = useState(null);
   const [count,   setCount]   = useState(null);
@@ -235,11 +239,11 @@ function FolderTile({ prefix, name, onClick }) {
     <div
       ref={ref}
       className="tile folder-tile"
-      onClick={onClick}
+      onClick={() => onClick(prefix)}
       role="button"
       tabIndex={0}
       aria-label={`Open folder ${name}`}
-      onKeyDown={(e) => e.key === "Enter" && onClick()}
+      onKeyDown={(e) => e.key === "Enter" && onClick(prefix)}
     >
       <div className="tile-inner">
         {preview ? (
@@ -260,7 +264,7 @@ function FolderTile({ prefix, name, onClick }) {
       </div>
     </div>
   );
-}
+});
 
 // ─── Image thumbnail ──────────────────────────────────────────────────────────
 //
@@ -274,24 +278,24 @@ function FolderTile({ prefix, name, onClick }) {
 // Clicking any tile (loaded or placeholder) opens the Lightbox which always
 // fetches the original full-resolution file directly from S3.
 
-function ImageTile({ image, onClick }) {
+const ImageTile = memo(function ImageTile({ image, index, onClick }) {
   const fileName = image.key.split("/").pop();
 
   // status: "idle" | "loading" | "loaded" | "highres" | "error"
   const [status,    setStatus]    = useState("idle");
   const [objectUrl, setObjectUrl] = useState(null);
   const ref        = useRef(null);
-  const blobUrlRef = useRef(null); // tracked separately for cleanup
+  const blobUrlRef = useRef(null);
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
 
-    // Local status mirror used inside observer callbacks to avoid stale React
-    // state closures. React state (setStatus / setObjectUrl) is used only to
-    // drive rendering; this variable drives the load/unload logic.
-    let localStatus = "idle"; // "idle" | "loading" | "loaded" | "highres" | "error"
+    // Local status mirror — avoids stale React-state closures inside observer callbacks.
+    let localStatus = "idle";
     let cancelled   = false;
+    const abort     = new AbortController();
+    const { signal } = abort;
 
     function revoke() {
       if (blobUrlRef.current) {
@@ -325,18 +329,18 @@ function ImageTile({ image, onClick }) {
       }
 
       // ── 3. Range-fetch first 64 KB → parse pixel dimensions ────────────────
-      // 64 KB is needed because DSLR/phone JPEGs embed EXIF/APP1 blocks that
-      // can be 20–80 KB before the SOF marker that carries the pixel dimensions.
-      // If the server ignores the Range header and returns 200 (full file) we
-      // reuse that blob in step 4 so the file is only downloaded once.
+      // 64 KB covers DSLR/phone JPEGs with large EXIF/APP1 blocks before SOF.
+      // If the server returns 200 (ignores Range), reuse that blob in step 4.
       const imgUrl = getImageUrl(image.key);
       let cachedFullBlob = null;
       try {
-        const rangeResp = await fetch(imgUrl, { headers: { Range: "bytes=0-65535" } });
+        const rangeResp = await fetch(imgUrl, {
+          headers: { Range: "bytes=0-65535" },
+          signal,
+        });
         if (cancelled) return;
 
         if (rangeResp.status === 200) {
-          // Server sent the full file — parse dims from a slice and reuse the blob.
           cachedFullBlob = await rangeResp.blob();
           if (cancelled) return;
           const buf = await cachedFullBlob.slice(0, 65536).arrayBuffer();
@@ -348,7 +352,6 @@ function ImageTile({ image, onClick }) {
             return;
           }
         } else {
-          // 206 Partial Content — parse the slice directly.
           const buf = await rangeResp.arrayBuffer();
           if (cancelled) return;
           const dims = parseDimensions(buf);
@@ -358,15 +361,14 @@ function ImageTile({ image, onClick }) {
             return;
           }
         }
-      } catch {
+      } catch (e) {
+        if (cancelled || e?.name === "AbortError") return;
         // Range request failed — fall through to full download.
-        if (cancelled) return;
       }
 
       // ── 4. Full download → cache → display ─────────────────────────────────
       try {
-        // Reuse the blob from step 3 if the server already sent the whole file.
-        const blob = cachedFullBlob ?? await fetch(imgUrl).then((r) => r.blob());
+        const blob = cachedFullBlob ?? await fetch(imgUrl, { signal }).then((r) => r.blob());
         if (cancelled) return;
 
         setCached(image.key, blob); // queued batch write — doesn't block display
@@ -376,15 +378,14 @@ function ImageTile({ image, onClick }) {
         setObjectUrl(url);
         localStatus = "loaded";
         setStatus("loaded");
-      } catch {
-        if (!cancelled) {
+      } catch (e) {
+        if (!cancelled && e?.name !== "AbortError") {
           localStatus = "error";
           setStatus("error");
         }
       }
     }
 
-    // Shared observers — no per-tile IntersectionObserver instances created.
     watchLoad(el,   (on) => { if (on && localStatus === "idle") load(); });
     watchUnload(el, (on) => {
       if (!on && localStatus === "loaded") {
@@ -397,6 +398,7 @@ function ImageTile({ image, onClick }) {
 
     return () => {
       cancelled = true;
+      abort.abort();
       stopLoad(el);
       stopUnload(el);
       revoke();
@@ -407,11 +409,11 @@ function ImageTile({ image, onClick }) {
     <div
       ref={ref}
       className="tile image-tile"
-      onClick={onClick}
+      onClick={() => onClick(index)}
       role="button"
       tabIndex={0}
       aria-label={`View image ${fileName}`}
-      onKeyDown={(e) => e.key === "Enter" && onClick()}
+      onKeyDown={(e) => e.key === "Enter" && onClick(index)}
     >
       <div className="tile-inner">
         {(status === "idle" || status === "loading") && (
@@ -430,7 +432,7 @@ function ImageTile({ image, onClick }) {
       </div>
     </div>
   );
-}
+});
 
 // ─── Main gallery ─────────────────────────────────────────────────────────────
 
@@ -470,21 +472,19 @@ export default function Gallery({ prefix, onNavigate }) {
     return () => { cancelled = true; };
   }, [prefix]);
 
-  // Sort helpers — memoized so lightbox open/close doesn't re-sort 300 items.
-  const getFolderName = (fp) => fp.replace(/\/$/, "").split("/").pop() ?? fp;
-
   const sortedFolders = useMemo(() =>
     [...folders].sort((a, b) => {
       const cmp = getFolderName(a).localeCompare(getFolderName(b));
       return sortOrder === "desc" ? -cmp : cmp;
     }),
-    [folders, sortOrder] // eslint-disable-line react-hooks/exhaustive-deps
+    [folders, sortOrder]
   );
 
   const sortedImages = useMemo(() =>
     [...images].sort((a, b) => {
+      // lastModified is a Date object from the AWS SDK — subtract directly.
       const cmp = sortBy === "date"
-        ? new Date(a.lastModified) - new Date(b.lastModified)
+        ? a.lastModified - b.lastModified
         : a.key.localeCompare(b.key);
       return sortOrder === "desc" ? -cmp : cmp;
     }),
@@ -494,10 +494,13 @@ export default function Gallery({ prefix, onNavigate }) {
   const visibleImages = useMemo(() => sortedImages.slice(0, shown), [sortedImages, shown]);
   const remaining     = sortedImages.length - shown;
 
+  // Stable callbacks so memoized tile components don't re-render on every
+  // Gallery render (e.g. lightbox open/close, sort change).
   const handleFolderClick = useCallback(
     (folderPrefix) => { onNavigate(toHashPath(folderPrefix)); },
     [onNavigate]
   );
+  const handleImageClick = useCallback((idx) => setLbIndex(idx), []);
 
   // ── Render states ──────────────────────────────────────────────────────────
 
@@ -577,14 +580,15 @@ export default function Gallery({ prefix, onNavigate }) {
             key={fp}
             prefix={fp}
             name={getFolderName(fp)}
-            onClick={() => handleFolderClick(fp)}
+            onClick={handleFolderClick}
           />
         ))}
         {visibleImages.map((img, idx) => (
           <ImageTile
             key={img.key}
             image={img}
-            onClick={() => setLbIndex(idx)}
+            index={idx}
+            onClick={handleImageClick}
           />
         ))}
       </div>
