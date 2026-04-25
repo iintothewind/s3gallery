@@ -8,10 +8,12 @@
  * (private-browsing mode, storage errors, etc.) — they silently return null/false.
  */
 
-const DB_NAME = "s3-gallery-cache";
-const STORE   = "images";
-const VERSION = 1;
-const TTL_MS  = 24 * 60 * 60 * 1000; // 24 hours
+const DB_NAME          = "s3-gallery-cache";
+const STORE            = "images";
+const VERSION          = 1;
+const TTL_MS           = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_CACHE_ENTRIES = 400; // ~400 thumbnails × ~1 MB avg ≈ 400 MB cap
+const EVICT_EVERY_N    = 150; // run eviction after every 150 newly written entries
 
 let _db          = null;
 // Shared in-flight promise: prevents concurrent openDB() calls from each
@@ -91,6 +93,51 @@ export async function getCached(key) {
   }
 }
 
+// ─── Count-based eviction ─────────────────────────────────────────────────────
+//
+// TTL alone doesn't bound cache size within a session — all entries written
+// during one browsing session are < 24 h old and survive cleanupOldEntries().
+// After browsing 20-40 directories × 100-300 images the store can grow to
+// several GB, causing WebKit to keep excessive data in memory.
+//
+// _evictToLimit() scans the store, sorts by timestamp, and deletes the oldest
+// entries until the total is ≤ MAX_CACHE_ENTRIES. It runs every EVICT_EVERY_N
+// newly written blobs (tracked in _sessionWriteCount).
+
+let _sessionWriteCount = 0;
+
+async function _evictToLimit(db) {
+  const entries = [];
+  await new Promise((resolve) => {
+    let tx;
+    try { tx = db.transaction(STORE, "readonly"); } catch { return resolve(); }
+    const req = tx.objectStore(STORE).openCursor();
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (!cursor) return;
+      entries.push({ key: cursor.key, ts: cursor.value.timestamp });
+      cursor.continue();
+    };
+    tx.oncomplete = resolve;
+    tx.onerror    = resolve;
+  });
+
+  if (entries.length <= MAX_CACHE_ENTRIES) return;
+
+  entries.sort((a, b) => a.ts - b.ts);
+  const toDelete = entries.slice(0, entries.length - MAX_CACHE_ENTRIES);
+
+  await new Promise((resolve) => {
+    let tx;
+    try { tx = db.transaction(STORE, "readwrite"); } catch { return resolve(); }
+    for (const { key } of toDelete) {
+      try { tx.objectStore(STORE).delete(key); } catch {}
+    }
+    tx.oncomplete = resolve;
+    tx.onerror    = resolve;
+  });
+}
+
 // ─── Batched write queue ──────────────────────────────────────────────────────
 //
 // setCached() used to open one readwrite transaction per image. IDB serialises
@@ -135,6 +182,14 @@ async function _flushWriteQueue() {
       resolve();
     };
   });
+
+  // After every EVICT_EVERY_N writes, enforce the entry count ceiling.
+  // Fire-and-forget so it doesn't block the display pipeline.
+  _sessionWriteCount += batch.length;
+  if (_sessionWriteCount >= EVICT_EVERY_N) {
+    _sessionWriteCount = 0;
+    _evictToLimit(db).catch(() => {});
+  }
 }
 
 /**
@@ -150,7 +205,7 @@ export function setCached(key, blob) {
 }
 
 /**
- * Deletes all cache entries older than 24 h.
+ * Deletes cache entries older than 24 h, then enforces MAX_CACHE_ENTRIES.
  * Intended to be called once on page load.
  */
 export async function cleanupOldEntries() {
@@ -175,6 +230,9 @@ export async function cleanupOldEntries() {
       tx.oncomplete = () => resolve();
       tx.onerror    = () => resolve();
     });
+    // After TTL eviction, also enforce the absolute count ceiling so the store
+    // doesn't grow unboundedly across many sessions.
+    await _evictToLimit(db);
   } catch {
     // Non-fatal — storage may be unavailable
   }

@@ -27,7 +27,7 @@ const _sharedLoad = new IntersectionObserver(
 );
 const _sharedUnload = new IntersectionObserver(
   (entries) => { for (const e of entries) _unloadCbs.get(e.target)?.(e.isIntersecting); },
-  { rootMargin: "2000px" }
+  { rootMargin: "800px" }
 );
 
 const watchLoad   = (el, cb) => { _loadCbs.set(el, cb);   _sharedLoad.observe(el); };
@@ -146,6 +146,18 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
         return;
       }
 
+      // Check IndexedDB cache first — same key ImageTile uses, so a folder
+      // preview and its corresponding thumbnail share one cached blob.
+      const cachedBlob = await getCached(candidate.key);
+      if (cancelled) return;
+      if (cachedBlob) {
+        const url = URL.createObjectURL(cachedBlob);
+        blobUrlRef.current = url;
+        setPreview(url);
+        localStatus = "loaded";
+        return;
+      }
+
       const imgUrl = getImageUrl(candidate.key);
       let fullBlob = null;
 
@@ -181,6 +193,7 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
       try {
         const blob = fullBlob ?? await fetch(imgUrl).then((r) => r.blob());
         if (cancelled) return;
+        setCached(candidate.key, blob); // share cache with ImageTile
         const url = URL.createObjectURL(blob);
         blobUrlRef.current = url;
         setPreview(url);
@@ -420,7 +433,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
           <div className="tile-loading" />
         )}
         {status === "loaded" && objectUrl && (
-          <img src={objectUrl} alt={fileName} className="tile-img" />
+          <img src={objectUrl} alt={fileName} className="tile-img" decoding="async" />
         )}
         {status === "highres" && <HighResPlaceholder />}
         {status === "error" && (
