@@ -21,7 +21,7 @@ window.CONFIG = {
   rootPrefix: "nexus/content/vol-97/",
 
   /** Title shown in the page header */
-  title: "My Gallery",
+  title: "S3Gallery",
 
   /** File extensions to treat as images (lowercase, including the dot) */
   imageExtensions: [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".svg"],
@@ -40,5 +40,13 @@ window.CONFIG = {
    */
   thumbnailMaxBytes:  2.5 * 1024 * 1024,
   thumbnailMaxWidth:  2560,
-  thumbnailMaxHeight: 2048,
+  thumbnailMaxHeight: 2560,
+
+  /**
+   * Maximum number of thumbnail blobs kept in the IndexedDB cache at once.
+   * When exceeded, the oldest entries are evicted automatically.
+   * Raise for more aggressive caching (faster repeat visits),
+   * lower for stricter memory/storage limits on the device.
+   */
+  cacheMaxEntries: 2000,
 };

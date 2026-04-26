@@ -12,8 +12,8 @@ const DB_NAME          = "s3-gallery-cache";
 const STORE            = "images";
 const VERSION          = 1;
 const TTL_MS           = 24 * 60 * 60 * 1000; // 24 hours
-const MAX_CACHE_ENTRIES = 400; // ~400 thumbnails × ~1 MB avg ≈ 400 MB cap
-const EVICT_EVERY_N    = 150; // run eviction after every 150 newly written entries
+const MAX_CACHE_ENTRIES = window.CONFIG?.cacheMaxEntries ?? 2000;
+const EVICT_EVERY_N    = Math.ceil(MAX_CACHE_ENTRIES / 10); // ~10% of cap
 
 let _db          = null;
 // Shared in-flight promise: prevents concurrent openDB() calls from each
