@@ -5,7 +5,6 @@ import {
   getImageUrl,
   getImageKitThumbnailUrl,
   getImageKitThumbnailSrcSet,
-  hasImageKitEndpoint,
 } from "../s3.js";
 import { getCached } from "../imageCache.js";
 import { parseDimensions } from "../imageDimensions.js";
@@ -267,7 +266,7 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
         return;
       }
 
-      listObjects(prefix)
+      listObjects(prefix, signal)
         .then(({ images }) => {
           if (cancelled) return;
           listCacheSet(prefix, images);
@@ -356,6 +355,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
   const fileName = image.key.split("/").pop();
   const imageKitUrl = getImageKitThumbnailUrl(image.key);
   const imageKitSrcSet = imageKitUrl ? getImageKitThumbnailSrcSet(image.key) : null;
+  const thumbnailCacheKey = getThumbnailCacheKey(image);
 
   // status: "idle" | "loading" | "loaded" | "highres" | "error"
   const [status,    setStatus]    = useState("idle");
@@ -394,8 +394,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       }
 
       // ── 1. Local thumbnail cache ────────────────────────────────────────────
-      const cacheKey = getThumbnailCacheKey(image);
-      const cached = await getCached(cacheKey);
+      const cached = await getCached(thumbnailCacheKey);
       if (cancelled) return;
       if (cached) {
         const url = URL.createObjectURL(cached);
@@ -426,7 +425,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
     }
 
     function onThumbnailReady(e) {
-      if (e.detail?.cacheKey !== getThumbnailCacheKey(image) || !e.detail?.blob) return;
+      if (e.detail?.cacheKey !== thumbnailCacheKey || !e.detail?.blob) return;
 
       revoke();
       const url = URL.createObjectURL(e.detail.blob);
@@ -458,7 +457,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       stopUnload(el);
       revoke();
     };
-  }, [image.key, image.size, imageKitUrl]);
+  }, [image, imageKitUrl, thumbnailCacheKey]);
 
   return (
     <div
@@ -517,13 +516,14 @@ export default function Gallery({ prefix, onNavigate }) {
   // Reload whenever the prefix changes
   useEffect(() => {
     let cancelled = false;
+    const abort = new AbortController();
     setLoading(true);
     setError(null);
     setFolders([]);
     setImages([]);
     setLbIndex(null);
 
-    listObjects(prefix)
+    listObjects(prefix, abort.signal)
       .then(({ folders, images }) => {
         if (cancelled) return;
         setFolders(folders);
@@ -536,7 +536,10 @@ export default function Gallery({ prefix, onNavigate }) {
         if (!cancelled) setLoading(false);
       });
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      abort.abort();
+    };
   }, [prefix]);
 
   const sortedFolders = useMemo(() =>

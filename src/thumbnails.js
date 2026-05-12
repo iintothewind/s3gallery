@@ -1,8 +1,8 @@
 /**
  * Local thumbnail generation used only when ImageKit is not configured.
  *
- * The original image is fetched through the browser HTTP cache, decoded once,
- * resized on a canvas, then only the small thumbnail blob is stored in IDB.
+ * The lightbox image is already decoded by the browser; when idle, it is drawn
+ * to a small canvas and only that small thumbnail blob is stored in IDB.
  */
 
 const DEFAULT_THUMB_SIZE = 480;
@@ -20,7 +20,16 @@ function enqueue(task, signal) {
       return;
     }
 
-    queue.push({ task, resolve, reject, signal });
+    const job = { task, resolve, reject, signal, onAbort: null };
+    job.onAbort = () => {
+      const index = queue.indexOf(job);
+      if (index === -1) return;
+      queue.splice(index, 1);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+
+    signal?.addEventListener("abort", job.onAbort, { once: true });
+    queue.push(job);
     runNext();
   });
 }
@@ -30,6 +39,7 @@ function runNext() {
   if (activeJobs >= max || queue.length === 0) return;
 
   const job = queue.shift();
+  job.signal?.removeEventListener("abort", job.onAbort);
   if (job.signal?.aborted) {
     job.reject(new DOMException("Aborted", "AbortError"));
     runNext();
@@ -61,31 +71,6 @@ export function getThumbnailCacheKey(image) {
     getTimestamp(image.lastModified),
     image.key,
   ].join(":");
-}
-
-async function decodeImage(blob) {
-  if ("createImageBitmap" in window) {
-    try {
-      return await createImageBitmap(blob, { imageOrientation: "from-image" });
-    } catch {
-      // Fall back to HTMLImageElement below.
-    }
-  }
-
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.decoding = "async";
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Failed to decode image"));
-    };
-    img.src = url;
-  });
 }
 
 function canvasToBlob(canvas, type, quality) {
@@ -121,21 +106,12 @@ async function renderThumbnailBlob(source) {
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(source, 0, 0, width, height);
 
-  return await canvasToBlob(canvas, "image/webp", quality);
-}
-
-async function createThumbnailBlob(originalBlob) {
-  const bitmap = await decodeImage(originalBlob);
-
   try {
-    return await renderThumbnailBlob(bitmap);
+    return await canvasToBlob(canvas, "image/webp", quality);
   } finally {
-    bitmap.close?.();
+    canvas.width = 0;
+    canvas.height = 0;
   }
-}
-
-export function createLocalThumbnailBlob(originalBlob, signal) {
-  return enqueue(() => createThumbnailBlob(originalBlob), signal);
 }
 
 export function createLocalThumbnailBlobFromImage(imageElement, signal) {

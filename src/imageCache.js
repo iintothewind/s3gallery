@@ -4,6 +4,7 @@
  * Stores generated thumbnail Blobs keyed by a versioned thumbnail cache key
  * with a Unix-ms timestamp. Original S3 image blobs are not stored here; those
  * rely on the browser's normal HTTP cache.
+ * Legacy non-thumbnail entries from older builds are removed during cleanup.
  * Entries older than TTL_MS (24 h) are treated as stale and ignored.
  *
  * All public functions are safe to call even when IndexedDB is unavailable
@@ -14,8 +15,12 @@ const DB_NAME          = "s3-gallery-cache";
 const STORE            = "images";
 const VERSION          = 1;
 const TTL_MS           = 24 * 60 * 60 * 1000; // 24 hours
-const MAX_CACHE_ENTRIES = window.CONFIG?.cacheMaxEntries ?? 2000;
-const EVICT_EVERY_N    = Math.ceil(MAX_CACHE_ENTRIES / 10); // ~10% of cap
+const CONFIG_CACHE_MAX = Number(window.CONFIG?.cacheMaxEntries ?? 2000);
+const MAX_CACHE_ENTRIES = Number.isFinite(CONFIG_CACHE_MAX)
+  ? Math.max(0, Math.floor(CONFIG_CACHE_MAX))
+  : 2000;
+const EVICT_EVERY_N    = Math.max(1, Math.ceil(MAX_CACHE_ENTRIES / 10)); // ~10% of cap
+const THUMB_KEY_PREFIX = "thumb:";
 
 let _db          = null;
 // Shared in-flight promise: prevents concurrent openDB() calls from each
@@ -25,6 +30,15 @@ let _db          = null;
 // themselves, leaking connections that block all future version-change
 // operations and hang every subsequent open().
 let _openPromise = null;
+
+function isThumbnailKey(key) {
+  return typeof key === "string" && key.startsWith(THUMB_KEY_PREFIX);
+}
+
+function getEntryTimestamp(entry) {
+  const ts = entry?.timestamp;
+  return Number.isFinite(ts) ? ts : null;
+}
 
 function openDB() {
   if (_db) return Promise.resolve(_db);
@@ -82,7 +96,13 @@ export async function getCached(key) {
       }
       req.onsuccess = () => {
         const entry = req.result;
-        if (entry && Date.now() - entry.timestamp < TTL_MS) {
+        const timestamp = getEntryTimestamp(entry);
+        if (
+          isThumbnailKey(key) &&
+          entry?.blob &&
+          timestamp !== null &&
+          Date.now() - timestamp < TTL_MS
+        ) {
           resolve(entry.blob);
         } else {
           resolve(null);
@@ -110,6 +130,7 @@ let _sessionWriteCount = 0;
 
 async function _evictToLimit(db) {
   const entries = [];
+  const invalidKeys = [];
   await new Promise((resolve) => {
     let tx;
     try { tx = db.transaction(STORE, "readonly"); } catch { return resolve(); }
@@ -117,22 +138,30 @@ async function _evictToLimit(db) {
     req.onsuccess = (e) => {
       const cursor = e.target.result;
       if (!cursor) return;
-      entries.push({ key: cursor.key, ts: cursor.value.timestamp });
+      const timestamp = getEntryTimestamp(cursor.value);
+      if (!isThumbnailKey(cursor.key) || !cursor.value?.blob || timestamp === null) {
+        invalidKeys.push(cursor.key);
+      } else {
+        entries.push({ key: cursor.key, ts: timestamp });
+      }
       cursor.continue();
     };
     tx.oncomplete = resolve;
     tx.onerror    = resolve;
   });
 
-  if (entries.length <= MAX_CACHE_ENTRIES) return;
+  if (entries.length <= MAX_CACHE_ENTRIES && invalidKeys.length === 0) return;
 
   entries.sort((a, b) => a.ts - b.ts);
-  const toDelete = entries.slice(0, entries.length - MAX_CACHE_ENTRIES);
+  const toDelete = [
+    ...invalidKeys,
+    ...entries.slice(0, Math.max(0, entries.length - MAX_CACHE_ENTRIES)).map(({ key }) => key),
+  ];
 
   await new Promise((resolve) => {
     let tx;
     try { tx = db.transaction(STORE, "readwrite"); } catch { return resolve(); }
-    for (const { key } of toDelete) {
+    for (const key of toDelete) {
       try { tx.objectStore(STORE).delete(key); } catch {}
     }
     tx.oncomplete = resolve;
@@ -198,6 +227,8 @@ async function _flushWriteQueue() {
  * the caller waiting for the write to commit.
  */
 export function setCached(key, blob) {
+  if (MAX_CACHE_ENTRIES <= 0 || !isThumbnailKey(key)) return;
+
   _writeQueue.set(key, blob);
   if (!_writeTimer) {
     _writeTimer = setTimeout(() => { _writeTimer = null; _flushWriteQueue(); }, 100);
@@ -223,7 +254,15 @@ export async function cleanupOldEntries() {
       req.onsuccess = (e) => {
         const cursor = e.target.result;
         if (!cursor) return;
-        if (cursor.value.timestamp < cutoff) cursor.delete();
+        const timestamp = getEntryTimestamp(cursor.value);
+        if (
+          !isThumbnailKey(cursor.key) ||
+          !cursor.value?.blob ||
+          timestamp === null ||
+          timestamp < cutoff
+        ) {
+          cursor.delete();
+        }
         cursor.continue();
       };
       req.onerror  = () => resolve();

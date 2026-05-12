@@ -45,9 +45,10 @@ window.CONFIG = {
 
   /**
    * Local fallback thumbnail settings used only when imageKitEndpoint is empty.
-   * Before decoding an original locally, the app checks these safety limits.
-   * Images above the byte or pixel thresholds show a High-Res placeholder in
-   * the gallery to avoid decoding very large bitmaps on mobile.
+   * Before using an original S3 image as a gallery thumbnail, the app checks
+   * these safety limits. Images above the byte or pixel thresholds show a
+   * High-Res placeholder in the gallery to avoid decoding very large bitmaps
+   * during thumbnail browsing on mobile.
    *
    * Safe originals are displayed directly as thumbnails through the browser
    * HTTP cache. High-Res images get a local thumbnail only after the user opens

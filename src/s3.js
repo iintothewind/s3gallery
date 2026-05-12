@@ -62,8 +62,8 @@ function encodeKeyPath(key) {
 }
 
 function getImageKitEndpoint() {
-  const endpoint = window.CONFIG.imageKitEndpoint || "";
-  return endpoint.trim().replace(/\/?$/, "/");
+  const endpoint = (window.CONFIG.imageKitEndpoint || "").trim();
+  return endpoint ? endpoint.replace(/\/+$/, "") + "/" : "";
 }
 
 function toImageKitPath(key) {
@@ -76,12 +76,12 @@ function toImageKitPath(key) {
 }
 
 export function hasImageKitEndpoint() {
-  return getImageKitEndpoint() !== "/";
+  return getImageKitEndpoint().length > 0;
 }
 
 export function getImageKitThumbnailUrl(key, width = 480) {
   const endpoint = getImageKitEndpoint();
-  if (endpoint === "/") return null;
+  if (!endpoint) return null;
 
   const quality = window.CONFIG.thumbnailQuality ?? 80;
   return buildSrc({
@@ -94,9 +94,14 @@ export function getImageKitThumbnailUrl(key, width = 480) {
 
 export function getImageKitThumbnailSrcSet(key) {
   const widths = window.CONFIG.thumbnailWidths || [240, 360, 480, 640];
-  return widths
-    .map((width) => `${getImageKitThumbnailUrl(key, width)} ${width}w`)
+  const srcset = widths
+    .map((width) => {
+      const url = getImageKitThumbnailUrl(key, width);
+      return url ? `${url} ${width}w` : null;
+    })
+    .filter(Boolean)
     .join(", ");
+  return srcset || null;
 }
 
 /**
@@ -111,7 +116,7 @@ export function getImageKitThumbnailSrcSet(key) {
  * @param {string} prefix  e.g. "" for root, "photos/landscapes/" for a subfolder
  * @returns {{ folders: string[], images: Array<{key,lastModified,size}> }}
  */
-export async function listObjects(prefix) {
+export async function listObjects(prefix, signal) {
   const client = getClient();
   const { bucketName } = window.CONFIG;
 
@@ -128,7 +133,7 @@ export async function listObjects(prefix) {
       ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
     });
 
-    const resp = await client.send(cmd);
+    const resp = await client.send(cmd, signal ? { abortSignal: signal } : undefined);
 
     for (const cp of resp.CommonPrefixes ?? []) {
       if (cp.Prefix) folders.push(cp.Prefix);

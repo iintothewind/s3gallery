@@ -48,6 +48,7 @@ function SlideImage({ image, alt, onDims }) {
 
   useEffect(() => {
     const abort = new AbortController();
+    let cancelled = false;
     signalRef.current = abort.signal;
 
     fetch(getImageUrl(imageKey), { signal: abort.signal })
@@ -56,7 +57,12 @@ function SlideImage({ image, alt, onDims }) {
         return r.blob();
       })
       .then((blob) => {
+        if (cancelled || abort.signal.aborted) return;
         const url = URL.createObjectURL(blob);
+        if (cancelled || abort.signal.aborted) {
+          URL.revokeObjectURL(url);
+          return;
+        }
         urlRef.current = url;
         setBlobUrl(url);
       })
@@ -64,10 +70,12 @@ function SlideImage({ image, alt, onDims }) {
         // AbortError means the slide was unmounted — nothing to do.
         if (e?.name === "AbortError") return;
         // Other network error — fall back to the direct URL.
+        if (cancelled) return;
         setBlobUrl(getImageUrl(imageKey));
       });
 
     return () => {
+      cancelled = true;
       abort.abort();
       if (signalRef.current === abort.signal) {
         signalRef.current = null;
@@ -99,12 +107,16 @@ function SlideImage({ image, alt, onDims }) {
         if (w && h) onDims(w, h);
 
         if (!hasImageKitEndpoint() && idleJobRef.current === null) {
+          if (!urlRef.current) return;
           const img = e.currentTarget;
           idleJobRef.current = runWhenIdle(() => {
             idleJobRef.current = null;
+            const signal = signalRef.current;
+            if (!signal || signal.aborted) return;
             const cacheKey = getThumbnailCacheKey(image);
-            createLocalThumbnailBlobFromImage(img, signalRef.current)
+            createLocalThumbnailBlobFromImage(img, signal)
               .then((thumbnailBlob) => {
+                if (signal.aborted || signalRef.current !== signal) return;
                 setCached(cacheKey, thumbnailBlob);
                 dispatchThumbnailReady(cacheKey, thumbnailBlob);
               })
