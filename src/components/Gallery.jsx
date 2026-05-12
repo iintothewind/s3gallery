@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback, useMemo, memo } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo } from "react";
+import { useWindowVirtualizer } from "@tanstack/react-virtual";
 import {
   listObjects,
   getImageUrl,
@@ -14,6 +15,10 @@ import Lightbox from "./Lightbox.jsx";
 import Skeleton from "./Skeleton.jsx";
 
 const TILE_IMAGE_SIZES = "(max-width: 480px) 50vw, 175px";
+const GRID_GAP = 12;
+const MOBILE_GRID_GAP = 8;
+const MIN_TILE_WIDTH = 175;
+const MOBILE_MIN_TILE_WIDTH = 130;
 const SIZE_LIMIT_BYTES = window.CONFIG.thumbnailMaxBytes ?? 1.2 * 1024 * 1024;
 const MAX_PX_W = window.CONFIG.thumbnailMaxWidth ?? 1920;
 const MAX_PX_H = window.CONFIG.thumbnailMaxHeight ?? 1920;
@@ -89,6 +94,49 @@ function listCacheSet(prefix, images) {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const getFolderName = (fp) => fp.replace(/\/$/, "").split("/").pop() ?? fp;
+
+function useElementWidth() {
+  const ref = useRef(null);
+  const [width, setWidth] = useState(0);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const target = el.parentElement ?? el;
+
+    const update = () => {
+      const measured = Math.round(target.getBoundingClientRect().width);
+      const viewportFallback = Math.max(0, Math.min(window.innerWidth, 1440) - 40);
+      const next = Math.max(measured, viewportFallback);
+      if (next > 0) {
+        setWidth((prev) => prev === next ? prev : next);
+      }
+    };
+    update();
+
+    if ("ResizeObserver" in window) {
+      const observer = new ResizeObserver(update);
+      observer.observe(target);
+      return () => observer.disconnect();
+    }
+
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  return [ref, width];
+}
+
+function getGridMetrics(width) {
+  const fallbackWidth = Math.max(1, Math.min(window.innerWidth || 0, 1440) - 40);
+  const safeWidth = Math.max(width || 0, fallbackWidth);
+  const gap = safeWidth <= 480 ? MOBILE_GRID_GAP : GRID_GAP;
+  const minTileWidth = safeWidth <= 480 ? MOBILE_MIN_TILE_WIDTH : MIN_TILE_WIDTH;
+  const columns = Math.max(1, Math.floor((safeWidth + gap) / (minTileWidth + gap)));
+  const tileSize = Math.max(1, Math.floor((safeWidth - gap * (columns - 1)) / columns));
+
+  return { safeWidth, gap, columns, tileSize };
+}
 
 // ─── Folder icon SVG ─────────────────────────────────────────────────────────
 
@@ -463,8 +511,8 @@ export default function Gallery({ prefix, onNavigate }) {
   const [images,    setImages]    = useState([]);
   const [sortBy,    setSortBy]    = useState("name");  // "name" | "date"
   const [sortOrder, setSortOrder] = useState("desc");  // "asc"  | "desc"
-  const [shown,     setShown]     = useState(window.CONFIG.pageSize || 50);
   const [lbIndex,   setLbIndex]   = useState(null);
+  const [gridRef, gridWidth] = useElementWidth();
 
   // Reload whenever the prefix changes
   useEffect(() => {
@@ -473,7 +521,6 @@ export default function Gallery({ prefix, onNavigate }) {
     setError(null);
     setFolders([]);
     setImages([]);
-    setShown(window.CONFIG.pageSize || 50);
     setLbIndex(null);
 
     listObjects(prefix)
@@ -511,8 +558,28 @@ export default function Gallery({ prefix, onNavigate }) {
     [images, sortBy, sortOrder]
   );
 
-  const visibleImages = useMemo(() => sortedImages.slice(0, shown), [sortedImages, shown]);
-  const remaining     = sortedImages.length - shown;
+  const galleryItems = useMemo(() => [
+    ...sortedFolders.map((prefix) => ({ type: "folder", key: prefix, prefix })),
+    ...sortedImages.map((image, imageIndex) => ({
+      type: "image",
+      key: image.key,
+      image,
+      imageIndex,
+    })),
+  ], [sortedFolders, sortedImages]);
+
+  const { gap: gridGap, columns: columnCount, tileSize } = getGridMetrics(gridWidth);
+  const rowCount = Math.ceil(galleryItems.length / columnCount);
+  const rowVirtualizer = useWindowVirtualizer({
+    count: rowCount,
+    estimateSize: () => tileSize + gridGap,
+    overscan: 4,
+    scrollMargin: gridRef.current?.offsetTop ?? 0,
+  });
+
+  useLayoutEffect(() => {
+    rowVirtualizer.measure();
+  }, [rowCount, tileSize, gridGap, columnCount]);
 
   // Stable callbacks so memoized tile components don't re-render on every
   // Gallery render (e.g. lightbox open/close, sort change).
@@ -594,40 +661,50 @@ export default function Gallery({ prefix, onNavigate }) {
         </div>
       )}
 
-      <div className="tile-grid">
-        {sortedFolders.map((fp) => (
-          <FolderTile
-            key={fp}
-            prefix={fp}
-            name={getFolderName(fp)}
-            onClick={handleFolderClick}
-          />
-        ))}
-        {visibleImages.map((img, idx) => (
-          <ImageTile
-            key={img.key}
-            image={img}
-            index={idx}
-            onClick={handleImageClick}
-          />
-        ))}
-      </div>
+      <div
+        ref={gridRef}
+        className="virtual-tile-grid"
+        style={{ height: rowVirtualizer.getTotalSize() }}
+      >
+        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+          const start = virtualRow.index * columnCount;
+          const rowItems = galleryItems.slice(start, start + columnCount);
 
-      {remaining > 0 && (
-        <div className="load-more-row">
-          <button
-            className="load-more-btn"
-            onClick={() => setShown((n) => n + (window.CONFIG.pageSize || 50))}
-          >
-            Load {Math.min(remaining, window.CONFIG.pageSize || 50)} more
-            &nbsp;({remaining} remaining)
-          </button>
-        </div>
-      )}
+          return (
+            <div
+              key={virtualRow.key}
+              className="virtual-tile-row"
+              style={{
+                gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`,
+                gap: `${gridGap}px`,
+                transform: `translateY(${virtualRow.start - rowVirtualizer.options.scrollMargin}px)`,
+              }}
+            >
+              {rowItems.map((item) => (
+                <div key={item.key} className="virtual-tile-cell">
+                  {item.type === "folder" ? (
+                    <FolderTile
+                      prefix={item.prefix}
+                      name={getFolderName(item.prefix)}
+                      onClick={handleFolderClick}
+                    />
+                  ) : (
+                    <ImageTile
+                      image={item.image}
+                      index={item.imageIndex}
+                      onClick={handleImageClick}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
 
       {lbIndex !== null && (
         <Lightbox
-          images={visibleImages}
+          images={sortedImages}
           currentIndex={lbIndex}
           onClose={() => setLbIndex(null)}
           onNavigate={setLbIndex}

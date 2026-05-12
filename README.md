@@ -14,8 +14,8 @@ window.CONFIG = {
   region:          "us-east-1",        // bucket's AWS region
   rootPrefix:      "",                 // "" = entire bucket; "photos/" = scope to subfolder
   title:           "My Gallery",
+  imageKitEndpoint: "",                // optional ImageKit URL endpoint for thumbnails
   imageExtensions: [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".svg"],
-  pageSize:        50,                 // thumbnails before "Load more"
 };
 ```
 
@@ -99,11 +99,11 @@ Or in the AWS Console: **S3 → your bucket → Permissions → Cross-origin res
 | Breadcrumb | Clickable path back to any parent folder |
 | Dark / light theme | Toggled from the header; preference saved to `localStorage` |
 | URL hash routing | `#photos/landscapes/` — shareable, supports browser back/forward |
-| Lazy thumbnails | Images load as they scroll into view (`loading="lazy"`) |
+| Virtual grid | Only visible rows are mounted, even in large folders |
+| Lazy thumbnails | Images load as they scroll into view |
 | Folder previews | Fetched lazily via `IntersectionObserver` |
 | Loading skeleton | Shimmer placeholders while S3 responds |
 | Sort | By name or last-modified date |
-| Load more | Pagination with configurable `pageSize` |
 | Pagination | Follows `NextContinuationToken` for buckets with > 1000 keys |
 | Responsive | Auto-fill grid adapts from mobile to widescreen |
 

@@ -160,6 +160,24 @@ code   { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
   }
 }
 
+.virtual-tile-grid {
+  position: relative;
+  width: 100%;
+}
+
+.virtual-tile-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  display: grid;
+  will-change: transform;
+}
+
+.virtual-tile-cell {
+  min-width: 0;
+}
+
 /* ─── Tiles (shared) ─────────────────────────────────────────────────────────── */
 
 .tile {
@@ -308,24 +326,6 @@ code   { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
   0%   { background-position: 100% 0; }
   100% { background-position: -100% 0; }
 }
-
-/* ─── Load more ──────────────────────────────────────────────────────────────── */
-
-.load-more-row {
-  text-align: center;
-  margin-top: 36px;
-}
-
-.load-more-btn {
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 11px 28px;
-  font-size: 0.875rem;
-  transition: background 0.15s, border-color 0.15s;
-}
-.load-more-btn:hover { background: var(--surface-2); border-color: var(--accent); }
 
 /* ─── Status boxes ───────────────────────────────────────────────────────────── */
 

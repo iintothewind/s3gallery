@@ -35,9 +35,6 @@ window.CONFIG = {
   /** File extensions to treat as images (lowercase, including the dot) */
   imageExtensions: [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".svg"],
 
-  /** Number of image thumbnails shown before a "Load more" button appears */
-  pageSize: 50,
-
   /**
    * ImageKit thumbnail settings.
    * The browser picks from thumbnailWidths via srcset; thumbnailQuality is
