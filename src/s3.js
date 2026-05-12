@@ -1,4 +1,5 @@
 import { S3Client, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { buildSrc } from "@imagekit/react";
 
 /**
  * Returns a singleton S3Client that sends UNSIGNED requests.
@@ -53,6 +54,56 @@ export function getImageUrl(key) {
   return `https://${bucketName}.s3.${region}.amazonaws.com/${encodedKey}`;
 }
 
+function encodeKeyPath(key) {
+  return key
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+}
+
+function getImageKitEndpoint() {
+  const endpoint = (window.CONFIG.imageKitEndpoint || "").trim();
+  return endpoint ? endpoint.replace(/\/+$/, "") + "/" : "";
+}
+
+function toImageKitPath(key) {
+  const rootPrefix = window.CONFIG.rootPrefix || "";
+  const relativeKey = rootPrefix && key.startsWith(rootPrefix)
+    ? key.slice(rootPrefix.length)
+    : key;
+
+  return `/${encodeKeyPath(relativeKey.replace(/^\/+/, ""))}`;
+}
+
+export function hasImageKitEndpoint() {
+  return getImageKitEndpoint().length > 0;
+}
+
+export function getImageKitThumbnailUrl(key, width = 480) {
+  const endpoint = getImageKitEndpoint();
+  if (!endpoint) return null;
+
+  const quality = window.CONFIG.thumbnailQuality ?? 80;
+  return buildSrc({
+    urlEndpoint: endpoint,
+    src: toImageKitPath(key),
+    transformation: [{ width, quality }],
+    transformationPosition: "path",
+  });
+}
+
+export function getImageKitThumbnailSrcSet(key) {
+  const widths = window.CONFIG.thumbnailWidths || [240, 360, 480, 640];
+  const srcset = widths
+    .map((width) => {
+      const url = getImageKitThumbnailUrl(key, width);
+      return url ? `${url} ${width}w` : null;
+    })
+    .filter(Boolean)
+    .join(", ");
+  return srcset || null;
+}
+
 /**
  * Lists immediate subfolders and image files under `prefix`.
  *
@@ -65,7 +116,7 @@ export function getImageUrl(key) {
  * @param {string} prefix  e.g. "" for root, "photos/landscapes/" for a subfolder
  * @returns {{ folders: string[], images: Array<{key,lastModified,size}> }}
  */
-export async function listObjects(prefix) {
+export async function listObjects(prefix, signal) {
   const client = getClient();
   const { bucketName } = window.CONFIG;
 
@@ -82,7 +133,7 @@ export async function listObjects(prefix) {
       ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
     });
 
-    const resp = await client.send(cmd);
+    const resp = await client.send(cmd, signal ? { abortSignal: signal } : undefined);
 
     for (const cp of resp.CommonPrefixes ?? []) {
       if (cp.Prefix) folders.push(cp.Prefix);

@@ -23,27 +23,46 @@ window.CONFIG = {
   /** Title shown in the page header */
   title: "S3Gallery",
 
+  /**
+   * Optional ImageKit endpoint for gallery thumbnails.
+   * Leave as "" to load thumbnails directly from S3 using the legacy pipeline.
+   *
+   * This ImageKit endpoint is configured with rootPrefix as its storage root,
+   * so thumbnail URLs strip rootPrefix from the S3 key.
+   */
+  imageKitEndpoint: "https://ik.imagekit.io/iintothewind/",
+
   /** File extensions to treat as images (lowercase, including the dot) */
   imageExtensions: [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".svg"],
 
-  /** Number of image thumbnails shown before a "Load more" button appears */
-  pageSize: 50,
+  /**
+   * ImageKit thumbnail settings.
+   * The browser picks from thumbnailWidths via srcset; thumbnailQuality is
+   * passed to ImageKit as q-80 by default.
+   */
+  thumbnailWidths: [240, 360, 480, 640],
+  thumbnailQuality: 80,
 
   /**
-   * Thumbnail lazy-load filters.
-   * Images that exceed either threshold are shown as a High-Res placeholder
-   * in the gallery grid (clicking still opens the full image in the lightbox).
+   * Local fallback thumbnail settings used only when imageKitEndpoint is empty.
+   * Before using an original S3 image as a gallery thumbnail, the app checks
+   * these safety limits. Images above the byte or pixel thresholds show a
+   * High-Res placeholder in the gallery to avoid decoding very large bitmaps
+   * during thumbnail browsing on mobile.
    *
-   * thumbnailMaxBytes     — max file size in bytes (default 2 MB)
-   * thumbnailMaxWidth     — max pixel width  (default 2560)
-   * thumbnailMaxHeight    — max pixel height (default 1440)
+   * Safe originals are displayed directly as thumbnails through the browser
+   * HTTP cache. High-Res images get a local thumbnail only after the user opens
+   * the full image in the lightbox.
    */
   thumbnailMaxBytes:  2.5 * 1024 * 1024,
   thumbnailMaxWidth:  2560,
   thumbnailMaxHeight: 2560,
+  localThumbnailMaxSize: 480,
+  localThumbnailQuality: 0.8,
+  localThumbnailConcurrency: 2,
 
   /**
-   * Maximum number of thumbnail blobs kept in the IndexedDB cache at once.
+   * Maximum number of locally generated thumbnail blobs kept in IndexedDB.
    * When exceeded, the oldest entries are evicted automatically.
    * Raise for more aggressive caching (faster repeat visits),
    * lower for stricter memory/storage limits on the device.

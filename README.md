@@ -14,8 +14,17 @@ window.CONFIG = {
   region:          "us-east-1",        // bucket's AWS region
   rootPrefix:      "",                 // "" = entire bucket; "photos/" = scope to subfolder
   title:           "My Gallery",
+  imageKitEndpoint: "",                // optional ImageKit URL endpoint for thumbnails
+  thumbnailWidths: [240, 360, 480, 640],
+  thumbnailQuality: 80,
+  thumbnailMaxBytes:  2.5 * 1024 * 1024,
+  thumbnailMaxWidth:  2560,
+  thumbnailMaxHeight: 2560,
+  localThumbnailMaxSize: 480,
+  localThumbnailQuality: 0.8,
+  localThumbnailConcurrency: 2,
+  cacheMaxEntries: 2000,
   imageExtensions: [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".svg"],
-  pageSize:        50,                 // thumbnails before "Load more"
 };
 ```
 
@@ -26,6 +35,31 @@ in S3 without rebuilding:
 ```bash
 aws s3 cp public/config.js s3://my-bucket-name/config.js
 ```
+
+### Thumbnails
+
+If `imageKitEndpoint` is set, gallery thumbnails are loaded through ImageKit
+with path transformations such as:
+
+```text
+https://ik.imagekit.io/iintothewind/tr:w-480,q-80/folder/image.jpg
+```
+
+This project assumes the ImageKit origin is already scoped to `rootPrefix`.
+Therefore the app strips `rootPrefix` from the S3 key when building ImageKit
+thumbnail URLs. Lightbox/original images still load directly from S3.
+
+If `imageKitEndpoint` is empty, the fallback path is:
+
+1. Check IndexedDB for a locally generated thumbnail.
+2. If missing, inspect a small byte range of the S3 original to read dimensions.
+3. Display the original directly as a thumbnail only when it is below
+   `thumbnailMaxBytes`, `thumbnailMaxWidth`, and `thumbnailMaxHeight`.
+4. Otherwise show a `High-Res` placeholder. A local thumbnail is generated only
+   after the user opens that original in the lightbox.
+
+Only small generated thumbnails are written to IndexedDB. Original images rely
+on normal HTTP caching and are not stored in IndexedDB.
 
 ## Development
 
@@ -99,13 +133,15 @@ Or in the AWS Console: **S3 → your bucket → Permissions → Cross-origin res
 | Breadcrumb | Clickable path back to any parent folder |
 | Dark / light theme | Toggled from the header; preference saved to `localStorage` |
 | URL hash routing | `#photos/landscapes/` — shareable, supports browser back/forward |
-| Lazy thumbnails | Images load as they scroll into view (`loading="lazy"`) |
+| Virtual grid | Only visible rows are mounted, even in large folders |
+| Lazy thumbnails | Tile images load as they scroll into view |
 | Folder previews | Fetched lazily via `IntersectionObserver` |
 | Loading skeleton | Shimmer placeholders while S3 responds |
 | Sort | By name or last-modified date |
-| Load more | Pagination with configurable `pageSize` |
-| Pagination | Follows `NextContinuationToken` for buckets with > 1000 keys |
+| S3 pagination | Follows `NextContinuationToken` for prefixes with > 1000 keys |
 | Responsive | Auto-fill grid adapts from mobile to widescreen |
+
+See [`DESIGN.md`](DESIGN.md) for the runtime architecture and memory model.
 
 ## Security
 
