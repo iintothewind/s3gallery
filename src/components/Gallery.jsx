@@ -1,16 +1,43 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from "react";
-import { listObjects, getImageUrl } from "../s3.js";
-import { getCached, setCached } from "../imageCache.js";
+import {
+  listObjects,
+  getImageUrl,
+  getImageKitThumbnailUrl,
+  getImageKitThumbnailSrcSet,
+  hasImageKitEndpoint,
+} from "../s3.js";
+import { getCached } from "../imageCache.js";
 import { parseDimensions } from "../imageDimensions.js";
+import { getThumbnailCacheKey, THUMBNAIL_READY_EVENT } from "../thumbnails.js";
 import { toHashPath } from "../App.jsx";
 import Lightbox from "./Lightbox.jsx";
 import Skeleton from "./Skeleton.jsx";
 
-// Thresholds are read from CONFIG at load time so they can be changed in
-// config.js without rebuilding the app. Fallbacks match the documented defaults.
-const SIZE_LIMIT_BYTES = window.CONFIG.thumbnailMaxBytes  ?? 2 * 1024 * 1024;
-const MAX_PX_W         = window.CONFIG.thumbnailMaxWidth  ?? 2560;
-const MAX_PX_H         = window.CONFIG.thumbnailMaxHeight ?? 1440;
+const TILE_IMAGE_SIZES = "(max-width: 480px) 50vw, 175px";
+const SIZE_LIMIT_BYTES = window.CONFIG.thumbnailMaxBytes ?? 1.2 * 1024 * 1024;
+const MAX_PX_W = window.CONFIG.thumbnailMaxWidth ?? 1920;
+const MAX_PX_H = window.CONFIG.thumbnailMaxHeight ?? 1920;
+
+async function canDisplayOriginalAsThumbnail(image, signal) {
+  if (image.size > SIZE_LIMIT_BYTES) return false;
+
+  try {
+    const resp = await fetch(getImageUrl(image.key), {
+      headers: { Range: "bytes=0-65535" },
+      signal,
+    });
+    if (!resp.ok) return false;
+
+    const buf = await resp.arrayBuffer();
+    const dims = parseDimensions(buf);
+    if (!dims) return true;
+
+    return dims.width <= MAX_PX_W && dims.height <= MAX_PX_H;
+  } catch (e) {
+    if (e?.name === "AbortError") throw e;
+    return false;
+  }
+}
 
 // ─── Shared tile observers ────────────────────────────────────────────────────
 //
@@ -130,6 +157,8 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
     // "no-preview" = loaded but no suitable image found (nothing to evict)
     let localStatus = "idle";
     let cancelled   = false;
+    const abort     = new AbortController();
+    const { signal } = abort;
 
     function revoke() {
       if (blobUrlRef.current) {
@@ -139,16 +168,23 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
     }
 
     async function loadPreview(images) {
-      // Pick the first candidate that fits within the size limit.
-      const candidate = images.find((img) => img.size <= SIZE_LIMIT_BYTES);
+      const candidate = images[0];
       if (!candidate) {
         localStatus = "no-preview";
         return;
       }
 
-      // Check IndexedDB cache first — same key ImageTile uses, so a folder
-      // preview and its corresponding thumbnail share one cached blob.
-      const cachedBlob = await getCached(candidate.key);
+      const imageKitPreviewUrl = getImageKitThumbnailUrl(candidate.key);
+      if (imageKitPreviewUrl) {
+        setPreview(imageKitPreviewUrl);
+        localStatus = "loaded";
+        return;
+      }
+
+      // Check the local thumbnail cache first. The cache key is versioned with
+      // size and lastModified so old original-blob entries are never reused.
+      const cacheKey = getThumbnailCacheKey(candidate);
+      const cachedBlob = await getCached(cacheKey);
       if (cancelled) return;
       if (cachedBlob) {
         const url = URL.createObjectURL(cachedBlob);
@@ -158,45 +194,13 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
         return;
       }
 
-      const imgUrl = getImageUrl(candidate.key);
-      let fullBlob = null;
-
-      // Range-fetch 64 KB to check pixel dimensions before committing to a
-      // full download. Same logic as ImageTile step 3.
       try {
-        const resp = await fetch(imgUrl, { headers: { Range: "bytes=0-65535" } });
-        if (cancelled) return;
-
-        if (resp.status === 200) {
-          fullBlob = await resp.blob();
-          if (cancelled) return;
-          const buf = await fullBlob.slice(0, 65536).arrayBuffer();
-          if (cancelled) return;
-          const dims = parseDimensions(buf);
-          if (dims && (dims.width > MAX_PX_W || dims.height > MAX_PX_H)) {
-            localStatus = "no-preview";
-            return;
-          }
-        } else {
-          const buf = await resp.arrayBuffer();
-          if (cancelled) return;
-          const dims = parseDimensions(buf);
-          if (dims && (dims.width > MAX_PX_W || dims.height > MAX_PX_H)) {
-            localStatus = "no-preview";
-            return;
-          }
+        if (!await canDisplayOriginalAsThumbnail(candidate, signal)) {
+          localStatus = "no-preview";
+          return;
         }
-      } catch {
-        if (cancelled) return;
-      }
 
-      try {
-        const blob = fullBlob ?? await fetch(imgUrl).then((r) => r.blob());
-        if (cancelled) return;
-        setCached(candidate.key, blob); // share cache with ImageTile
-        const url = URL.createObjectURL(blob);
-        blobUrlRef.current = url;
-        setPreview(url);
+        setPreview(getImageUrl(candidate.key));
         localStatus = "loaded";
       } catch {
         if (!cancelled) localStatus = "no-preview";
@@ -242,6 +246,7 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
 
     return () => {
       cancelled = true;
+      abort.abort();
       stopLoad(el);
       stopUnload(el);
       revoke();
@@ -260,7 +265,13 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
     >
       <div className="tile-inner">
         {preview ? (
-          <img src={preview} alt="" className="tile-img" />
+          <img
+            src={preview}
+            alt=""
+            className="tile-img"
+            loading="lazy"
+            decoding="async"
+          />
         ) : (
           <div className="folder-icon-bg">
             <FolderIcon />
@@ -282,21 +293,26 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
 // ─── Image thumbnail ──────────────────────────────────────────────────────────
 //
 // Loading pipeline (triggered by IntersectionObserver):
-//   1. Check IndexedDB — if a fresh (<24 h) blob exists, display it immediately.
-//   2. Check image.size from the S3 listing — if > 2 MB, show High-Res placeholder.
-//   3. Range-fetch the first 4 KB and parse pixel dimensions.
-//      If > 2560×1440, show High-Res placeholder.
-//   4. Fetch the full image, cache the blob in IndexedDB, display it.
+//   1. If ImageKit is configured, use its CDN thumbnail URL.
+//   2. Otherwise check IndexedDB for a locally generated thumbnail.
+//   3. If missing and the original is within safe thresholds, display the S3
+//      original directly and rely on the browser HTTP cache.
+//   4. If the original exceeds any threshold, show the High-Res placeholder.
+//      Local thumbnails for these images are produced later when the user opens
+//      the full image in the Lightbox.
 //
 // Clicking any tile (loaded or placeholder) opens the Lightbox which always
 // fetches the original full-resolution file directly from S3.
 
 const ImageTile = memo(function ImageTile({ image, index, onClick }) {
   const fileName = image.key.split("/").pop();
+  const imageKitUrl = getImageKitThumbnailUrl(image.key);
+  const imageKitSrcSet = imageKitUrl ? getImageKitThumbnailSrcSet(image.key) : null;
 
   // status: "idle" | "loading" | "loaded" | "highres" | "error"
   const [status,    setStatus]    = useState("idle");
   const [objectUrl, setObjectUrl] = useState(null);
+  const [thumbnailUrl, setThumbnailUrl] = useState(null);
   const ref        = useRef(null);
   const blobUrlRef = useRef(null);
 
@@ -322,8 +338,16 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       localStatus = "loading";
       setStatus("loading");
 
-      // ── 1. IndexedDB cache ──────────────────────────────────────────────────
-      const cached = await getCached(image.key);
+      if (imageKitUrl) {
+        setThumbnailUrl(imageKitUrl);
+        setStatus("loaded");
+        localStatus = "loaded";
+        return;
+      }
+
+      // ── 1. Local thumbnail cache ────────────────────────────────────────────
+      const cacheKey = getThumbnailCacheKey(image);
+      const cached = await getCached(cacheKey);
       if (cancelled) return;
       if (cached) {
         const url = URL.createObjectURL(cached);
@@ -334,61 +358,15 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
         return;
       }
 
-      // ── 2. Size check (free — already in listing metadata) ─────────────────
-      if (image.size > SIZE_LIMIT_BYTES) {
-        localStatus = "highres";
-        setStatus("highres");
-        return;
-      }
-
-      // ── 3. Range-fetch first 64 KB → parse pixel dimensions ────────────────
-      // 64 KB covers DSLR/phone JPEGs with large EXIF/APP1 blocks before SOF.
-      // If the server returns 200 (ignores Range), reuse that blob in step 4.
-      const imgUrl = getImageUrl(image.key);
-      let cachedFullBlob = null;
+      // ── 2. Fallback direct S3 thumbnail or High-Res placeholder ────────────
       try {
-        const rangeResp = await fetch(imgUrl, {
-          headers: { Range: "bytes=0-65535" },
-          signal,
-        });
-        if (cancelled) return;
-
-        if (rangeResp.status === 200) {
-          cachedFullBlob = await rangeResp.blob();
-          if (cancelled) return;
-          const buf = await cachedFullBlob.slice(0, 65536).arrayBuffer();
-          if (cancelled) return;
-          const dims = parseDimensions(buf);
-          if (dims && (dims.width > MAX_PX_W || dims.height > MAX_PX_H)) {
-            localStatus = "highres";
-            setStatus("highres");
-            return;
-          }
-        } else {
-          const buf = await rangeResp.arrayBuffer();
-          if (cancelled) return;
-          const dims = parseDimensions(buf);
-          if (dims && (dims.width > MAX_PX_W || dims.height > MAX_PX_H)) {
-            localStatus = "highres";
-            setStatus("highres");
-            return;
-          }
+        if (!await canDisplayOriginalAsThumbnail(image, signal)) {
+          localStatus = "highres";
+          setStatus("highres");
+          return;
         }
-      } catch (e) {
-        if (cancelled || e?.name === "AbortError") return;
-        // Range request failed — fall through to full download.
-      }
 
-      // ── 4. Full download → cache → display ─────────────────────────────────
-      try {
-        const blob = cachedFullBlob ?? await fetch(imgUrl, { signal }).then((r) => r.blob());
-        if (cancelled) return;
-
-        setCached(image.key, blob); // queued batch write — doesn't block display
-
-        const url = URL.createObjectURL(blob);
-        blobUrlRef.current = url;
-        setObjectUrl(url);
+        setThumbnailUrl(getImageUrl(image.key));
         localStatus = "loaded";
         setStatus("loaded");
       } catch (e) {
@@ -399,11 +377,26 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       }
     }
 
+    function onThumbnailReady(e) {
+      if (e.detail?.cacheKey !== getThumbnailCacheKey(image) || !e.detail?.blob) return;
+
+      revoke();
+      const url = URL.createObjectURL(e.detail.blob);
+      blobUrlRef.current = url;
+      setObjectUrl(url);
+      setThumbnailUrl(null);
+      localStatus = "loaded";
+      setStatus("loaded");
+    }
+
+    window.addEventListener(THUMBNAIL_READY_EVENT, onThumbnailReady);
+
     watchLoad(el,   (on) => { if (on && localStatus === "idle") load(); });
     watchUnload(el, (on) => {
       if (!on && localStatus === "loaded") {
         revoke();
         setObjectUrl(null);
+        setThumbnailUrl(null);
         localStatus = "idle";
         setStatus("idle");
       }
@@ -412,11 +405,12 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
     return () => {
       cancelled = true;
       abort.abort();
+      window.removeEventListener(THUMBNAIL_READY_EVENT, onThumbnailReady);
       stopLoad(el);
       stopUnload(el);
       revoke();
     };
-  }, [image.key, image.size]);
+  }, [image.key, image.size, imageKitUrl]);
 
   return (
     <div
@@ -431,6 +425,19 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       <div className="tile-inner">
         {(status === "idle" || status === "loading") && (
           <div className="tile-loading" />
+        )}
+        {thumbnailUrl && status !== "error" && (
+          <img
+            src={thumbnailUrl}
+            srcSet={imageKitSrcSet}
+            sizes={TILE_IMAGE_SIZES}
+            alt={fileName}
+            className="tile-img"
+            loading="lazy"
+            decoding="async"
+            onLoad={() => setStatus("loaded")}
+            onError={() => setStatus("error")}
+          />
         )}
         {status === "loaded" && objectUrl && (
           <img src={objectUrl} alt={fileName} className="tile-img" decoding="async" />

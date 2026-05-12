@@ -1,7 +1,9 @@
 /**
- * IndexedDB-backed image cache.
+ * IndexedDB-backed local thumbnail cache.
  *
- * Stores image Blobs keyed by S3 object key with a Unix-ms timestamp.
+ * Stores generated thumbnail Blobs keyed by a versioned thumbnail cache key
+ * with a Unix-ms timestamp. Original S3 image blobs are not stored here; those
+ * rely on the browser's normal HTTP cache.
  * Entries older than TTL_MS (24 h) are treated as stale and ignored.
  *
  * All public functions are safe to call even when IndexedDB is unavailable
@@ -97,8 +99,8 @@ export async function getCached(key) {
 //
 // TTL alone doesn't bound cache size within a session — all entries written
 // during one browsing session are < 24 h old and survive cleanupOldEntries().
-// After browsing 20-40 directories × 100-300 images the store can grow to
-// several GB, causing WebKit to keep excessive data in memory.
+// Even though entries are now small generated thumbnails, TTL alone doesn't
+// bound cache size within a long browsing session.
 //
 // _evictToLimit() scans the store, sorts by timestamp, and deletes the oldest
 // entries until the total is ≤ MAX_CACHE_ENTRIES. It runs every EVICT_EVERY_N
@@ -140,11 +142,9 @@ async function _evictToLimit(db) {
 
 // ─── Batched write queue ──────────────────────────────────────────────────────
 //
-// setCached() used to open one readwrite transaction per image. IDB serialises
-// all readwrite transactions on the same store, so 300 simultaneous cache
-// writes (full folder first load) queued up and stalled each other, making
-// every subsequent image display slower. The queue collects writes that arrive
-// within the same 100 ms window and flushes them in a single transaction.
+// setCached() batches thumbnail writes into a single readwrite transaction.
+// IDB serialises readwrite transactions on the same store, so batching keeps
+// large folder loads from creating a long queue of individual writes.
 
 const _writeQueue = new Map(); // key → blob
 let   _writeTimer = null;

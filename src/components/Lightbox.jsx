@@ -2,7 +2,28 @@ import { useEffect, useCallback, useRef, useState } from "react";
 import { Swiper, SwiperSlide } from "swiper/react";
 import { Virtual } from "swiper/modules";
 import "swiper/css";
-import { getImageUrl } from "../s3.js";
+import { getImageUrl, hasImageKitEndpoint } from "../s3.js";
+import { setCached } from "../imageCache.js";
+import {
+  createLocalThumbnailBlobFromImage,
+  dispatchThumbnailReady,
+  getThumbnailCacheKey,
+} from "../thumbnails.js";
+
+function runWhenIdle(task) {
+  if ("requestIdleCallback" in window) {
+    return window.requestIdleCallback(task, { timeout: 1200 });
+  }
+  return window.setTimeout(task, 250);
+}
+
+function cancelIdleJob(id) {
+  if ("cancelIdleCallback" in window) {
+    window.cancelIdleCallback(id);
+  } else {
+    window.clearTimeout(id);
+  }
+}
 
 /**
  * Fetches one lightbox image as a Blob URL and revokes it on unmount.
@@ -18,15 +39,22 @@ import { getImageUrl } from "../s3.js";
  *   window, React's cleanup runs the revoke for every slide that scrolls out
  *   of view — keeping live decoded memory bounded to ≈ 5 slides at all times.
  */
-function SlideImage({ imageKey, alt, onDims }) {
+function SlideImage({ image, alt, onDims }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const urlRef = useRef(null);
+  const idleJobRef = useRef(null);
+  const signalRef = useRef(null);
+  const imageKey = image.key;
 
   useEffect(() => {
     const abort = new AbortController();
+    signalRef.current = abort.signal;
 
     fetch(getImageUrl(imageKey), { signal: abort.signal })
-      .then((r) => r.blob())
+      .then((r) => {
+        if (!r.ok) throw new Error("Failed to fetch image");
+        return r.blob();
+      })
       .then((blob) => {
         const url = URL.createObjectURL(blob);
         urlRef.current = url;
@@ -41,12 +69,19 @@ function SlideImage({ imageKey, alt, onDims }) {
 
     return () => {
       abort.abort();
+      if (signalRef.current === abort.signal) {
+        signalRef.current = null;
+      }
+      if (idleJobRef.current !== null) {
+        cancelIdleJob(idleJobRef.current);
+        idleJobRef.current = null;
+      }
       if (urlRef.current) {
         URL.revokeObjectURL(urlRef.current);
         urlRef.current = null;
       }
     };
-  }, [imageKey]);
+  }, [image, imageKey]);
 
   if (!blobUrl) {
     return <div className="lb-slide-loading" />;
@@ -62,6 +97,20 @@ function SlideImage({ imageKey, alt, onDims }) {
         const w = e.target.naturalWidth;
         const h = e.target.naturalHeight;
         if (w && h) onDims(w, h);
+
+        if (!hasImageKitEndpoint() && idleJobRef.current === null) {
+          const img = e.currentTarget;
+          idleJobRef.current = runWhenIdle(() => {
+            idleJobRef.current = null;
+            const cacheKey = getThumbnailCacheKey(image);
+            createLocalThumbnailBlobFromImage(img, signalRef.current)
+              .then((thumbnailBlob) => {
+                setCached(cacheKey, thumbnailBlob);
+                dispatchThumbnailReady(cacheKey, thumbnailBlob);
+              })
+              .catch(() => {});
+          });
+        }
       }}
     />
   );
@@ -230,7 +279,7 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
           {images.map((img, idx) => (
             <SwiperSlide key={img.key} virtualIndex={idx}>
               <SlideImage
-                imageKey={img.key}
+                image={img}
                 alt={img.key.split("/").pop()}
                 onDims={(w, h) =>
                   setDimsMap((prev) => ({ ...prev, [img.key]: { w, h } }))

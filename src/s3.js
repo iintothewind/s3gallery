@@ -1,4 +1,5 @@
 import { S3Client, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { buildSrc } from "@imagekit/react";
 
 /**
  * Returns a singleton S3Client that sends UNSIGNED requests.
@@ -51,6 +52,51 @@ export function getImageUrl(key) {
     return `${origin}/${encodedKey}`;
   }
   return `https://${bucketName}.s3.${region}.amazonaws.com/${encodedKey}`;
+}
+
+function encodeKeyPath(key) {
+  return key
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+}
+
+function getImageKitEndpoint() {
+  const endpoint = window.CONFIG.imageKitEndpoint || "";
+  return endpoint.trim().replace(/\/?$/, "/");
+}
+
+function toImageKitPath(key) {
+  const rootPrefix = window.CONFIG.rootPrefix || "";
+  const relativeKey = rootPrefix && key.startsWith(rootPrefix)
+    ? key.slice(rootPrefix.length)
+    : key;
+
+  return `/${encodeKeyPath(relativeKey.replace(/^\/+/, ""))}`;
+}
+
+export function hasImageKitEndpoint() {
+  return getImageKitEndpoint() !== "/";
+}
+
+export function getImageKitThumbnailUrl(key, width = 480) {
+  const endpoint = getImageKitEndpoint();
+  if (endpoint === "/") return null;
+
+  const quality = window.CONFIG.thumbnailQuality ?? 80;
+  return buildSrc({
+    urlEndpoint: endpoint,
+    src: toImageKitPath(key),
+    transformation: [{ width, quality }],
+    transformationPosition: "path",
+  });
+}
+
+export function getImageKitThumbnailSrcSet(key) {
+  const widths = window.CONFIG.thumbnailWidths || [240, 360, 480, 640];
+  return widths
+    .map((width) => `${getImageKitThumbnailUrl(key, width)} ${width}w`)
+    .join(", ");
 }
 
 /**
