@@ -25,6 +25,61 @@ function cancelIdleJob(id) {
   }
 }
 
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+async function fetchBlobWithProgress(url, signal, onProgress) {
+  const response = await fetch(url, { signal });
+  if (!response.ok) throw new Error(`Failed to fetch image (${response.status})`);
+
+  const contentType = response.headers.get("content-type") || "application/octet-stream";
+  const total = Number(response.headers.get("content-length")) || 0;
+
+  onProgress({ loaded: 0, total, percent: total ? 0 : null });
+
+  if (!response.body) {
+    const blob = await response.blob();
+    onProgress({ loaded: blob.size, total: blob.size, percent: 100 });
+    return blob;
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  let lastPercent = -1;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    chunks.push(value);
+    loaded += value.length;
+
+    const percent = total
+      ? Math.min(99, Math.floor((loaded / total) * 100))
+      : null;
+
+    if (percent === null || percent !== lastPercent) {
+      lastPercent = percent;
+      onProgress({ loaded, total, percent });
+    }
+  }
+
+  onProgress({ loaded, total: total || loaded, percent: 100 });
+  return new Blob(chunks, { type: contentType });
+}
+
 /**
  * Fetches one lightbox image as a Blob URL and revokes it on unmount.
  *
@@ -41,6 +96,12 @@ function cancelIdleJob(id) {
  */
 function SlideImage({ image, alt, onDims }) {
   const [blobUrl, setBlobUrl] = useState(null);
+  const [progress, setProgress] = useState({
+    loaded: 0,
+    total: image.size || 0,
+    percent: image.size ? 0 : null,
+  });
+  const [error, setError] = useState(null);
   const urlRef = useRef(null);
   const idleJobRef = useRef(null);
   const signalRef = useRef(null);
@@ -51,11 +112,19 @@ function SlideImage({ image, alt, onDims }) {
     let cancelled = false;
     signalRef.current = abort.signal;
 
-    fetch(getImageUrl(imageKey), { signal: abort.signal })
-      .then((r) => {
-        if (!r.ok) throw new Error("Failed to fetch image");
-        return r.blob();
-      })
+    setBlobUrl(null);
+    setError(null);
+    setProgress({
+      loaded: 0,
+      total: image.size || 0,
+      percent: image.size ? 0 : null,
+    });
+
+    fetchBlobWithProgress(getImageUrl(imageKey), abort.signal, (nextProgress) => {
+      if (!cancelled && !abort.signal.aborted) {
+        setProgress(nextProgress);
+      }
+    })
       .then((blob) => {
         if (cancelled || abort.signal.aborted) return;
         const url = URL.createObjectURL(blob);
@@ -69,9 +138,8 @@ function SlideImage({ image, alt, onDims }) {
       .catch((e) => {
         // AbortError means the slide was unmounted — nothing to do.
         if (e?.name === "AbortError") return;
-        // Other network error — fall back to the direct URL.
         if (cancelled) return;
-        setBlobUrl(getImageUrl(imageKey));
+        setError(e?.message || "Failed to load image");
       });
 
     return () => {
@@ -92,7 +160,43 @@ function SlideImage({ image, alt, onDims }) {
   }, [image, imageKey]);
 
   if (!blobUrl) {
-    return <div className="lb-slide-loading" />;
+    const progressText = progress.percent === null
+      ? "Downloading original"
+      : `Downloading original ${progress.percent}%`;
+    const byteText = progress.total
+      ? `${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`
+      : formatBytes(progress.loaded);
+
+    return (
+      <div className="lb-slide-loading">
+        <div className="lb-loading-card">
+          {error ? (
+            <>
+              <div className="lb-loading-title">Failed to load original</div>
+              <div className="lb-loading-meta">{error}</div>
+            </>
+          ) : (
+            <>
+              <div className="lb-loading-title">{progressText}</div>
+              <div
+                className={`lb-progress ${progress.percent === null ? "is-indeterminate" : ""}`}
+                role="progressbar"
+                aria-label="Original image download progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progress.percent ?? undefined}
+              >
+                <div
+                  className="lb-progress-fill"
+                  style={{ width: progress.percent === null ? "40%" : `${progress.percent}%` }}
+                />
+              </div>
+              {byteText && <div className="lb-loading-meta">{byteText}</div>}
+            </>
+          )}
+        </div>
+      </div>
+    );
   }
 
   return (

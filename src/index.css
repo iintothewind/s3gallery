@@ -433,19 +433,73 @@ code   { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
   .lb-next { right: 4px; }
 }
 
-/* Slide loading shimmer (shown while blob URL is being fetched) */
+/* Slide loading progress (shown while blob URL is being fetched) */
 .lb-slide-loading {
   width: 100%;
   height: 100%;
-  background: linear-gradient(
-    90deg,
-    rgba(255,255,255,0.04) 25%,
-    rgba(255,255,255,0.09) 50%,
-    rgba(255,255,255,0.04) 75%
-  );
-  background-size: 300% 100%;
-  animation: shimmer 1.6s infinite ease-in-out;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 4px;
+}
+
+.lb-loading-card {
+  width: min(320px, 72vw);
+  padding: 18px 18px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(18, 18, 18, 0.86);
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(8px);
+}
+
+.lb-loading-title {
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.86rem;
+  font-weight: 500;
+  line-height: 1.35;
+  margin-bottom: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lb-progress {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.lb-progress-fill {
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.16s ease-out;
+}
+
+.lb-progress.is-indeterminate .lb-progress-fill {
+  position: absolute;
+  left: -40%;
+  width: 40%;
+  animation: progress-slide 1.2s infinite ease-in-out;
+}
+
+.lb-loading-meta {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 0.74rem;
+  line-height: 1.4;
+  margin-top: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes progress-slide {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(350%); }
 }
 
 /* Swiper container */
