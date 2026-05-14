@@ -380,6 +380,14 @@ code   { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
   display: block;
   user-select: none;
+  transition: transform 0.18s ease;
+  transform-origin: center;
+}
+
+.lb-overlay.is-image-rotated .lb-img {
+  max-width: 84vh;
+  max-height: 90vw;
+  transform: rotate(90deg);
 }
 
 /* Close button */
@@ -401,6 +409,36 @@ code   { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
   z-index: 1001;
 }
 .lb-close:hover { background: rgba(255, 255, 255, 0.24); }
+
+.lb-rotate {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 1.25rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+  z-index: 1001;
+}
+.lb-rotate:hover { background: rgba(255, 255, 255, 0.24); }
+
+.lb-rotate svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 
 /* Prev / next */
 .lb-nav {

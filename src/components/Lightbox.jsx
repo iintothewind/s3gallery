@@ -39,6 +39,25 @@ function formatBytes(bytes) {
   return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
+function getViewportOrientation() {
+  if (typeof window === "undefined") return "portrait";
+  return window.innerWidth >= window.innerHeight ? "landscape" : "portrait";
+}
+
+function isMobileViewport() {
+  if (typeof window === "undefined") return false;
+  return (
+    window.matchMedia?.("(pointer: coarse)")?.matches ||
+    navigator.maxTouchPoints > 1 ||
+    /Android|iPad|iPhone|iPod|Mobile/i.test(navigator.userAgent || "")
+  );
+}
+
+function getImageOrientation(dims) {
+  if (!dims || dims.w === dims.h) return null;
+  return dims.w > dims.h ? "landscape" : "portrait";
+}
+
 async function fetchBlobWithProgress(url, signal, onProgress) {
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`Failed to fetch image (${response.status})`);
@@ -262,6 +281,13 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
   // Persists across slides so dimensions don't disappear when you swipe back.
   const [dimsMap, setDimsMap] = useState({});
   const currentDims = dimsMap[image?.key];
+  const [viewportOrientation, setViewportOrientation] = useState(getViewportOrientation);
+  const [isImageRotated, setIsImageRotated] = useState(false);
+  const imageOrientation = getImageOrientation(currentDims);
+  const showRotateButton =
+    isMobileViewport() &&
+    imageOrientation !== null &&
+    imageOrientation !== viewportOrientation;
 
   const sizeMB = image?.size
     ? (image.size / (1024 * 1024)).toFixed(1) + " MB"
@@ -279,12 +305,35 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
     if (hasPrev) onNavigate(currentIndex - 1);
   }, [hasPrev, currentIndex, onNavigate]);
 
+  const toggleImageRotation = useCallback((e) => {
+    e.stopPropagation();
+    setIsImageRotated((rotated) => !rotated);
+  }, []);
+
   // Sync Swiper when currentIndex changes from outside (keyboard / nav buttons)
   useEffect(() => {
     if (swiperRef.current && swiperRef.current.activeIndex !== currentIndex) {
       swiperRef.current.slideTo(currentIndex, 300);
     }
   }, [currentIndex]);
+
+  useEffect(() => {
+    setIsImageRotated(false);
+  }, [image?.key]);
+
+  useEffect(() => {
+    const onViewportChange = () => {
+      setViewportOrientation(getViewportOrientation());
+      setIsImageRotated(false);
+    };
+
+    window.addEventListener("resize", onViewportChange);
+    window.addEventListener("orientationchange", onViewportChange);
+    return () => {
+      window.removeEventListener("resize", onViewportChange);
+      window.removeEventListener("orientationchange", onViewportChange);
+    };
+  }, []);
 
   // Keyboard: Escape closes, arrow keys navigate
   useEffect(() => {
@@ -341,7 +390,10 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
 
   return (
     <div
-      className="lb-overlay"
+      className={[
+        "lb-overlay",
+        isImageRotated ? "is-image-rotated" : "",
+      ].filter(Boolean).join(" ")}
       onClick={onClose}
       role="dialog"
       aria-modal="true"
@@ -360,6 +412,24 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
         >
           ✕
         </button>
+
+        {showRotateButton && (
+          <button
+            className="lb-rotate"
+            onClick={toggleImageRotation}
+            aria-label={isImageRotated ? "Restore image orientation" : "Rotate image orientation"}
+            title={isImageRotated ? "Restore orientation" : "Rotate orientation"}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          </button>
+        )}
 
         {hasPrev && (
           <button
