@@ -10,6 +10,124 @@ import {
   getThumbnailCacheKey,
 } from "../thumbnails.js";
 
+function getFullscreenElement() {
+  return (
+    document.fullscreenElement ||
+    document.webkitFullscreenElement ||
+    document.msFullscreenElement ||
+    null
+  );
+}
+
+function isIOSLike() {
+  const ua = navigator.userAgent || "";
+  return (
+    /iPad|iPhone|iPod/.test(ua) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+  );
+}
+
+function isMobileLike() {
+  return (
+    /Android|iPad|iPhone|iPod|Mobile/i.test(navigator.userAgent || "") ||
+    navigator.maxTouchPoints > 1 ||
+    window.matchMedia?.("(pointer: coarse)")?.matches
+  );
+}
+
+function isPortraitViewport() {
+  return window.innerHeight > window.innerWidth;
+}
+
+function imagePrefersLandscape(dims) {
+  return Boolean(dims && dims.w > dims.h);
+}
+
+function canLockOrientation() {
+  return typeof screen.orientation?.lock === "function";
+}
+
+function canUseCssLandscapeFallback() {
+  return isMobileLike();
+}
+
+async function requestNativeFullscreen(element) {
+  if (!element) return false;
+  const request =
+    element.requestFullscreen ||
+    element.webkitRequestFullscreen ||
+    element.msRequestFullscreen;
+  if (!request) return false;
+
+  try {
+    await request.call(element);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function exitNativeFullscreen() {
+  if (!getFullscreenElement()) return;
+  const exit =
+    document.exitFullscreen ||
+    document.webkitExitFullscreen ||
+    document.msExitFullscreen;
+  if (!exit) return;
+
+  try {
+    await exit.call(document);
+  } catch {
+    // The browser can reject if fullscreen already changed via a system gesture.
+  }
+}
+
+async function exitElementFullscreen(element) {
+  const fullscreenElement = getFullscreenElement();
+  if (fullscreenElement && fullscreenElement === element) {
+    await exitNativeFullscreen();
+  }
+}
+
+async function lockLandscapeOrientation() {
+  if (!canLockOrientation()) return false;
+
+  try {
+    await screen.orientation.lock("landscape");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function unlockOrientation() {
+  try {
+    screen.orientation?.unlock?.();
+  } catch {
+    // Some browsers expose unlock but throw when no lock is currently active.
+  }
+}
+
+function getOrCreateThemeColorMeta() {
+  let meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.setAttribute("name", "theme-color");
+    document.head.appendChild(meta);
+  }
+  return meta;
+}
+
+function restoreBodyStyles(styles) {
+  if (!styles) return;
+  document.body.style.position = styles.position;
+  document.body.style.top = styles.top;
+  document.body.style.left = styles.left;
+  document.body.style.right = styles.right;
+  document.body.style.width = styles.width;
+  document.body.style.overflow = styles.overflow;
+}
+
 function runWhenIdle(task) {
   if ("requestIdleCallback" in window) {
     return window.requestIdleCallback(task, { timeout: 1200 });
@@ -256,20 +374,26 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
   const fileName = image?.key.split("/").pop() ?? "";
 
   const swiperRef  = useRef(null);
+  const overlayRef = useRef(null);
   const contentRef = useRef(null);
+  const smartFullscreenActiveRef = useRef(false);
+  const orientationLockedRef = useRef(false);
+  const immersiveLockRef = useRef(null);
+  const preLightboxBodyStylesRef = useRef(null);
 
   // Map of image key → { w, h } populated via onLoad on each slide's <img>.
   // Persists across slides so dimensions don't disappear when you swipe back.
   const [dimsMap, setDimsMap] = useState({});
   const currentDims = dimsMap[image?.key];
+  const [smartFullscreenActive, setSmartFullscreenActive] = useState(false);
+  const [forceCssLandscape, setForceCssLandscape] = useState(false);
 
   const sizeMB = image?.size
     ? (image.size / (1024 * 1024)).toFixed(1) + " MB"
     : null;
 
-  // Stable ref to onClose — lets the touch effect run once without stale closures.
+  // Stable close ref lets the touch effect run once without stale closures.
   const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
 
   const goNext = useCallback(() => {
     if (hasNext) onNavigate(currentIndex + 1);
@@ -279,6 +403,134 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
     if (hasPrev) onNavigate(currentIndex - 1);
   }, [hasPrev, currentIndex, onNavigate]);
 
+  const releaseImmersiveLock = useCallback(({ bodyStyles } = {}) => {
+    const lock = immersiveLockRef.current;
+    document.documentElement.classList.remove("lightbox-immersive-lock");
+    document.body.classList.remove("lightbox-immersive-lock");
+
+    if (!lock) {
+      restoreBodyStyles(bodyStyles);
+      return;
+    }
+
+    restoreBodyStyles(bodyStyles ?? {
+      position: lock.bodyPosition,
+      top: lock.bodyTop,
+      left: lock.bodyLeft,
+      right: lock.bodyRight,
+      width: lock.bodyWidth,
+      overflow: lock.bodyOverflow,
+    });
+
+    if (lock.themeMeta) {
+      if (lock.hadThemeColor) {
+        lock.themeMeta.setAttribute("content", lock.themeColor);
+      } else {
+        lock.themeMeta.remove();
+      }
+    }
+
+    window.scrollTo(0, lock.scrollY);
+    immersiveLockRef.current = null;
+  }, []);
+
+  const applyImmersiveLock = useCallback(() => {
+    if (immersiveLockRef.current) return;
+
+    const themeMeta = getOrCreateThemeColorMeta();
+    const hadThemeColor = themeMeta.hasAttribute("content");
+    const themeColor = themeMeta.getAttribute("content") || "";
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+
+    immersiveLockRef.current = {
+      bodyPosition: document.body.style.position,
+      bodyTop: document.body.style.top,
+      bodyLeft: document.body.style.left,
+      bodyRight: document.body.style.right,
+      bodyWidth: document.body.style.width,
+      bodyOverflow: document.body.style.overflow,
+      hadThemeColor,
+      scrollY,
+      themeColor,
+      themeMeta,
+    };
+
+    document.documentElement.classList.add("lightbox-immersive-lock");
+    document.body.classList.add("lightbox-immersive-lock");
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${scrollY}px`;
+    document.body.style.left = "0";
+    document.body.style.right = "0";
+    document.body.style.width = "100%";
+    document.body.style.overflow = "hidden";
+    themeMeta.setAttribute("content", "#000000");
+  }, []);
+
+  const leaveSmartFullscreen = useCallback(async ({ exitNative = true } = {}) => {
+    smartFullscreenActiveRef.current = false;
+    orientationLockedRef.current = false;
+    setSmartFullscreenActive(false);
+    setForceCssLandscape(false);
+    releaseImmersiveLock();
+    unlockOrientation();
+    if (exitNative) {
+      await exitElementFullscreen(overlayRef.current);
+    }
+  }, [releaseImmersiveLock]);
+
+  const closeLightbox = useCallback(() => {
+    smartFullscreenActiveRef.current = false;
+    orientationLockedRef.current = false;
+    setSmartFullscreenActive(false);
+    setForceCssLandscape(false);
+    releaseImmersiveLock({ bodyStyles: preLightboxBodyStylesRef.current });
+    unlockOrientation();
+    exitElementFullscreen(overlayRef.current);
+    onClose();
+  }, [onClose, releaseImmersiveLock]);
+
+  onCloseRef.current = closeLightbox;
+
+  const syncCssLandscape = useCallback(() => {
+    if (!smartFullscreenActiveRef.current || orientationLockedRef.current) return;
+
+    if (canUseCssLandscapeFallback()) {
+      setForceCssLandscape(isPortraitViewport() && imagePrefersLandscape(currentDims));
+      return;
+    }
+
+    setForceCssLandscape(false);
+  }, [currentDims]);
+
+  const handleSmartFullscreen = useCallback(async (e) => {
+    e.stopPropagation();
+
+    if (smartFullscreenActiveRef.current) {
+      await leaveSmartFullscreen();
+      return;
+    }
+
+    const startedInPortrait = isPortraitViewport();
+    const shouldUseLandscape = startedInPortrait && imagePrefersLandscape(currentDims);
+    smartFullscreenActiveRef.current = true;
+    orientationLockedRef.current = false;
+    setSmartFullscreenActive(true);
+    setForceCssLandscape(false);
+    applyImmersiveLock();
+
+    if (!isIOSLike()) {
+      await requestNativeFullscreen(overlayRef.current);
+    }
+
+    if (shouldUseLandscape && !isIOSLike()) {
+      orientationLockedRef.current = await lockLandscapeOrientation();
+    }
+
+    if (shouldUseLandscape && !orientationLockedRef.current && canUseCssLandscapeFallback()) {
+      setForceCssLandscape(true);
+    }
+  }, [currentDims, leaveSmartFullscreen]);
+
   // Sync Swiper when currentIndex changes from outside (keyboard / nav buttons)
   useEffect(() => {
     if (swiperRef.current && swiperRef.current.activeIndex !== currentIndex) {
@@ -286,23 +538,78 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
     }
   }, [currentIndex]);
 
+  useEffect(() => {
+    syncCssLandscape();
+  }, [syncCssLandscape]);
+
+  useEffect(() => {
+    preLightboxBodyStylesRef.current = {
+      position: document.body.style.position,
+      top: document.body.style.top,
+      left: document.body.style.left,
+      right: document.body.style.right,
+      width: document.body.style.width,
+      overflow: document.body.style.overflow,
+    };
+
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      releaseImmersiveLock({ bodyStyles: preLightboxBodyStylesRef.current });
+      restoreBodyStyles(preLightboxBodyStylesRef.current);
+      preLightboxBodyStylesRef.current = null;
+    };
+  }, [releaseImmersiveLock]);
+
   // Keyboard: Escape closes, arrow keys navigate
   useEffect(() => {
     const onKey = (e) => {
       switch (e.key) {
-        case "Escape":     onClose(); break;
+        case "Escape":     closeLightbox(); break;
         case "ArrowRight": goNext();  break;
         case "ArrowLeft":  goPrev();  break;
         default: break;
       }
     };
     document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
     return () => {
       document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = "";
     };
-  }, [onClose, goNext, goPrev]);
+  }, [closeLightbox, goNext, goPrev]);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      if (!getFullscreenElement() && smartFullscreenActiveRef.current) {
+        smartFullscreenActiveRef.current = false;
+        orientationLockedRef.current = false;
+        setSmartFullscreenActive(false);
+        setForceCssLandscape(false);
+        releaseImmersiveLock();
+        unlockOrientation();
+      }
+    };
+
+    const onViewportChange = () => {
+      syncCssLandscape();
+    };
+
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange);
+    document.addEventListener("msfullscreenchange", onFullscreenChange);
+    window.addEventListener("resize", onViewportChange);
+    window.addEventListener("orientationchange", onViewportChange);
+
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", onFullscreenChange);
+      document.removeEventListener("msfullscreenchange", onFullscreenChange);
+      window.removeEventListener("resize", onViewportChange);
+      window.removeEventListener("orientationchange", onViewportChange);
+      releaseImmersiveLock();
+      unlockOrientation();
+      exitElementFullscreen(overlayRef.current);
+    };
+  }, [releaseImmersiveLock, syncCssLandscape]);
 
   // Native touch listeners for vertical swipe-up-to-close.
   // Swiper intercepts pointer events internally, so we bypass it by attaching
@@ -341,8 +648,13 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
 
   return (
     <div
-      className="lb-overlay"
-      onClick={onClose}
+      ref={overlayRef}
+      className={[
+        "lb-overlay",
+        smartFullscreenActive ? "is-smart-fullscreen" : "",
+        forceCssLandscape ? "force-css-landscape" : "",
+      ].filter(Boolean).join(" ")}
+      onClick={closeLightbox}
       role="dialog"
       aria-modal="true"
       aria-label={`Image viewer: ${fileName}`}
@@ -354,11 +666,20 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
       >
         <button
           className="lb-close"
-          onClick={onClose}
+          onClick={closeLightbox}
           aria-label="Close (Escape)"
           title="Close (Escape)"
         >
           ✕
+        </button>
+
+        <button
+          className="lb-smart-fullscreen"
+          onClick={handleSmartFullscreen}
+          aria-label={smartFullscreenActive ? "Return to lightbox" : "Smart fullscreen"}
+          title={smartFullscreenActive ? "Return to lightbox" : "Smart fullscreen"}
+        >
+          {smartFullscreenActive ? "返回" : "智能全屏"}
         </button>
 
         {hasPrev && (
