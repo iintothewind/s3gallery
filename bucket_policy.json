@@ -3,10 +3,10 @@
   "Id": "PolicyForDestinationBucket",
   "Statement": [
     {
-      "Sid": "copy",
+      "Sid": "AdminAccess",
       "Effect": "Allow",
       "Principal": {
-        "AWS": "arn:aws:iam::user"
+        "AWS": "arn:aws:iam::<ACCOUNT_ID>:role/<ADMIN_OR_REPLICATION_ROLE>"
       },
       "Action": [
         "s3:GetBucketVersioning",
@@ -23,21 +23,40 @@
         "s3:List*"
       ],
       "Resource": [
-        "arn:aws:s3:::bucket",
-        "arn:aws:s3:::bucket/*"
+        "arn:aws:s3:::<BUCKET_NAME>",
+        "arn:aws:s3:::<BUCKET_NAME>/*"
       ]
     },
     {
+      "Sid": "PublicReadAppShell",
       "Effect": "Allow",
       "Principal": "*",
-      "Action": [
-        "s3:List*",
-        "s3:Get*"
-      ],
+      "Action": "s3:GetObject",
       "Resource": [
-        "arn:aws:s3:::bucket",
-        "arn:aws:s3:::bucket/*"
+        "arn:aws:s3:::<BUCKET_NAME>/<APP_PREFIX>/*"
       ]
+    },
+    {
+      "Sid": "PublicListGalleryPrefix",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::<BUCKET_NAME>",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "<GALLERY_ROOT_PREFIX>/",
+            "<GALLERY_ROOT_PREFIX>/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "PublicReadGalleryObjects",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::<BUCKET_NAME>/<GALLERY_ROOT_PREFIX>/*"
     }
   ]
 }

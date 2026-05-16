@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "generate:env": "node scripts/generate-env-files.mjs",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

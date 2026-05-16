@@ -5,8 +5,32 @@ AWS SDK v3 with **anonymous (unsigned) requests** — no credentials required.
 
 ## Configuration
 
-Edit [`public/config.js`](public/config.js) before building (or edit it
-directly in S3 after deploying):
+There are two supported ways to configure the gallery. The recommended path is
+`.env.local` because it keeps bucket-specific values out of git.
+
+For local/private deployment values, copy [`.env.example`](.env.example) to
+`.env.local` and fill in your bucket, region, app deploy prefix, and gallery
+root prefix:
+
+```bash
+cp .env.example .env.local
+npm run generate:env
+```
+
+`npm run generate:env` reads `.env.local` and writes:
+
+```text
+public/config.js           # runtime gallery config copied into dist/
+bucket_policy.local.json   # concrete bucket policy for your bucket
+```
+
+Both `.env.local` and `bucket_policy.local.json` are ignored by git. The
+tracked [`bucket_policy.json`](bucket_policy.json) remains a placeholder
+template.
+
+You can also edit [`public/config.js`](public/config.js) directly before
+building (or edit it in S3 after deploying), but if you use `.env.local` this
+file should be treated as generated output:
 
 ```js
 window.CONFIG = {
@@ -29,11 +53,17 @@ window.CONFIG = {
 ```
 
 `config.js` is **not bundled** — it is copied to `dist/` as-is and loaded via
-a `<script>` tag at runtime.  After deploying, you can update just this file
-in S3 without rebuilding:
+a relative `<script src="./config.js">` tag at runtime. If you deploy the app
+under a subdirectory such as `nexus/gallery/`, the deployed runtime config is:
+
+```text
+s3://my-bucket-name/nexus/gallery/config.js
+```
+
+After deploying, you can update just this file in S3 without rebuilding:
 
 ```bash
-aws s3 cp public/config.js s3://my-bucket-name/config.js
+aws s3 cp public/config.js s3://my-bucket-name/nexus/gallery/config.js
 ```
 
 ### Thumbnails
@@ -70,34 +100,83 @@ npm run dev      # http://localhost:5173
 
 ## Build & Deploy
 
+This project is currently configured to read the app deploy prefix from
+`.env.local`:
+
 ```bash
-npm run build                                              # produces dist/
-aws s3 sync ./dist s3://my-bucket-name/ --delete          # deploy
+S3GALLERY_APP_PREFIX=nexus/gallery
 ```
+
+Vite turns this into `base: "/nexus/gallery/"`, so the built app is expected to
+be served from the S3 prefix `nexus/gallery/`.
+
+```bash
+npm run generate:env                                      # if using .env.local
+npm run build                                              # produces dist/
+aws s3 sync ./dist s3://my-bucket-name/nexus/gallery/ --delete
+```
+
+If you deploy to a different prefix, update `S3GALLERY_APP_PREFIX` in
+`.env.local`, run `npm run generate:env`, then rebuild. `vite.config.js` also
+reads `.env.local` during `npm run build`, but `generate:env` is still needed
+to refresh `public/config.js` and `bucket_policy.local.json`.
 
 ## S3 Bucket Setup
 
 Before deploying, configure your bucket with the included policy and CORS files.
-**Replace `my-bucket-name` with your actual bucket name in both files.**
+**Replace placeholder values with your actual bucket name, deploy prefix, and
+gallery root prefix before applying them.**
+
+Three paths must line up:
+
+| Placeholder | Example | Meaning |
+| --- | --- | --- |
+| `<BUCKET_NAME>` | `my-bucket-name` | The S3 bucket that hosts the app and images |
+| `<APP_PREFIX>` | `nexus/gallery` | Where the built `dist/` files are deployed |
+| `<GALLERY_ROOT_PREFIX>` | `nexus/content/vol-97` | The image root configured as `rootPrefix` without the trailing slash |
+
+These correspond to:
+
+```js
+// public/config.js
+window.CONFIG = {
+  bucketName: "my-bucket-name",
+  rootPrefix: "nexus/content/vol-97/",
+};
+```
+
+```js
+// vite.config.js
+export default defineConfig({
+  base: "/nexus/gallery/",
+});
+```
 
 ### Bucket Policy
 
-Apply [`bucket_policy.json`](bucket_policy.json) to allow public read access
-and replication. Replace the `bucket` placeholder in the `Resource` ARNs:
+[`bucket_policy.json`](bucket_policy.json) is a template. It shows the required
+permissions: the static app loads from `<APP_PREFIX>`, and the unsigned browser
+client lists/reads objects under `<GALLERY_ROOT_PREFIX>`.
+
+If you use `.env.local`, apply the generated `bucket_policy.local.json`
+instead. That file has these placeholders already filled in.
+
+Important mapping:
 
 ```json
-"Resource": [
-  "arn:aws:s3:::my-bucket-name",
-  "arn:aws:s3:::my-bucket-name/*"
-]
+"arn:aws:s3:::<BUCKET_NAME>/<APP_PREFIX>/*"
+"arn:aws:s3:::<BUCKET_NAME>/<GALLERY_ROOT_PREFIX>/*"
 ```
+
+Do not include leading or trailing slashes in `<APP_PREFIX>` or
+`<GALLERY_ROOT_PREFIX>` inside the bucket policy.
 
 Apply via AWS CLI:
 
 ```bash
 aws s3api put-bucket-policy \
   --bucket my-bucket-name \
-  --policy file://bucket_policy.json
+  --policy file://bucket_policy.local.json
 ```
 
 Or in the AWS Console: **S3 → your bucket → Permissions → Bucket policy**.
@@ -162,13 +241,17 @@ made.  The bucket's public policy handles authorisation entirely.
 
 ```text
 s3://my-bucket-name/
-├── index.html          ← gallery SPA entry point
-├── config.js           ← edit in-place without rebuilding
-├── assets/             ← bundled JS + CSS (content-hashed filenames)
-└── photos/             ← (example) your actual images
-    ├── landscapes/
-    └── portraits/
+├── nexus/
+│   ├── gallery/                  ← <APP_PREFIX>
+│   │   ├── index.html            ← gallery SPA entry point
+│   │   ├── config.js             ← edit in-place without rebuilding
+│   │   └── assets/               ← bundled JS + CSS
+│   └── content/
+│       └── vol-97/               ← <GALLERY_ROOT_PREFIX>
+│           ├── landscapes/
+│           └── portraits/
 ```
 
-Use `rootPrefix: "photos/"` in `config.js` to scope the gallery to that
-subfolder so it doesn't show `assets/` or `index.html` as folders.
+Use `rootPrefix: "nexus/content/vol-97/"` in `config.js` to scope the gallery
+to the image folder. The app files live separately under `nexus/gallery/`, so
+they do not appear as browsable gallery folders.
