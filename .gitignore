@@ -3,3 +3,6 @@ dist/*
 .env.local
 .env.*.local
 bucket_policy.local.json
+cors.local.xml
+public/config.js
+.DS_Store

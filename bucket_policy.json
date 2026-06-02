@@ -3,31 +3,6 @@
   "Id": "PolicyForDestinationBucket",
   "Statement": [
     {
-      "Sid": "AdminAccess",
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::<ACCOUNT_ID>:role/<ADMIN_OR_REPLICATION_ROLE>"
-      },
-      "Action": [
-        "s3:GetBucketVersioning",
-        "s3:GetObjectAcl",
-        "s3:GetObject",
-        "s3:ReplicateObject",
-        "s3:ReplicateDelete",
-        "s3:PutObjectAcl",
-        "s3:PutObjectVersionAcl",
-        "s3:PutBucketVersioning",
-        "s3:ObjectOwnerOverrideToBucketOwner",
-        "s3:DeleteObject",
-        "s3:Put*",
-        "s3:List*"
-      ],
-      "Resource": [
-        "arn:aws:s3:::<BUCKET_NAME>",
-        "arn:aws:s3:::<BUCKET_NAME>/*"
-      ]
-    },
-    {
       "Sid": "PublicReadAppShell",
       "Effect": "Allow",
       "Principal": "*",

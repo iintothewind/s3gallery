@@ -183,9 +183,9 @@ Or in the AWS Console: **S3 → your bucket → Permissions → Bucket policy**.
 
 ### CORS Configuration
 
-Apply [`cors.xml`](cors.xml) so the browser can call the S3 REST API from the
-gallery origin. Replace the `bucket` placeholder in the `AllowedOrigin` lines
-with your bucket name and region:
+Apply the generated [`cors.local.xml`](cors.local.xml) so the browser can call the
+S3 REST API from the gallery origin when you use `.env.local`. The template
+[`cors.xml`](cors.xml) remains as the placeholder source for `npm run generate:env`.
 
 ```xml
 <AllowedOrigin>https://my-bucket-name.s3.us-east-1.amazonaws.com</AllowedOrigin>
@@ -197,7 +197,7 @@ Apply via AWS CLI:
 ```bash
 aws s3api put-bucket-cors \
   --bucket my-bucket-name \
-  --cors-configuration file://cors.xml
+  --cors-configuration file://cors.local.xml
 ```
 
 Or in the AWS Console: **S3 → your bucket → Permissions → Cross-origin resource sharing (CORS)**.

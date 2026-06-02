@@ -4,8 +4,8 @@
     <ID>S3Drive-Gallery-Fix</ID>
     <AllowedOrigin>*</AllowedOrigin>
     <AllowedOrigin>https://web.s3drive.app</AllowedOrigin>
-    <AllowedOrigin>https://bucket.s3.us-west-1.amazonaws.com</AllowedOrigin>
-    <AllowedOrigin>https://bucket.s3.dualstack.us-west-1.amazonaws.com</AllowedOrigin>
+    <AllowedOrigin>https://BUCKET_NAME.s3.REGION.amazonaws.com</AllowedOrigin>
+    <AllowedOrigin>https://BUCKET_NAME.s3.dualstack.REGION.amazonaws.com</AllowedOrigin>
 
     <AllowedMethod>GET</AllowedMethod>
     <AllowedMethod>HEAD</AllowedMethod>

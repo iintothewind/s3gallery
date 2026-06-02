@@ -184,4 +184,24 @@ writeFileSync(
   `${JSON.stringify(policy, null, 2)}\n`,
 );
 
-console.log("Generated public/config.js and bucket_policy.local.json from .env.local.");
+const corsTemplatePath = resolve(root, "cors.xml");
+const corsLocalPath = resolve(root, "cors.local.xml");
+if (existsSync(corsTemplatePath)) {
+  let corsXml = readFileSync(corsTemplatePath, "utf8");
+  const endpoint =
+    region === "us-east-1"
+      ? `https://${bucketName}.s3.amazonaws.com`
+      : `https://${bucketName}.s3.${region}.amazonaws.com`;
+  const dualstackEndpoint =
+    region === "us-east-1"
+      ? `https://${bucketName}.s3.dualstack.amazonaws.com`
+      : `https://${bucketName}.s3.dualstack.${region}.amazonaws.com`;
+
+  corsXml = corsXml
+    .replace(/https:\/\/BUCKET_NAME\.s3\.dualstack\.REGION\.amazonaws\.com/g, dualstackEndpoint)
+    .replace(/https:\/\/BUCKET_NAME\.s3\.REGION\.amazonaws\.com/g, endpoint)
+    .replace(/BUCKET_NAME/g, bucketName);
+  writeFileSync(corsLocalPath, corsXml);
+}
+
+console.log("Generated public/config.js, bucket_policy.local.json and cors.local.xml from .env.local.");
