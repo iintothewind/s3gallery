@@ -11,7 +11,8 @@ images, especially on memory-constrained mobile browsers.
   thumbnail URL construction.
 - `src/components/Gallery.jsx` renders folder and image tiles with a virtual
   row grid.
-- `src/components/Lightbox.jsx` renders originals with Swiper's virtual slides.
+- `src/components/Lightbox.jsx` renders originals with Swiper's virtual slides;
+  the originals fill the stage and the caption floats over the bottom edge.
 - `src/imageCache.js` stores only generated local thumbnail blobs in IndexedDB.
 
 ## Thumbnail Pipeline
@@ -43,6 +44,29 @@ Fallback path, when `imageKitEndpoint` is empty:
 Legacy IndexedDB entries that are not `thumb:` keys are removed during cache
 cleanup. This prevents older builds that stored original blobs from leaving
 large stale data behind.
+
+## Lightbox Display & Interactions
+
+The lightbox stage (`.lb-swiper`) and `.lb-img` fill the whole overlay
+(`width/height: 100%`) with `object-fit: contain`. The original is therefore
+kept fully visible while being scaled proportionally so its **longer edge**
+touches a stage edge — the image uses the entire viewport with no extra
+letterbox, which also plays well with the rotate button.
+
+- **Caption floats above the image.** `.lb-caption` is `position: absolute` and
+  pinned to the bottom (`z-index: 1002`) instead of sitting in the document
+  flow, so the filename, meta, and `N / total` counter stay visible on small
+  screens without pushing the image out of the viewport. A topwards gradient
+  keeps the text readable, and `env(safe-area-inset-bottom)` respects iOS home
+  indicators. The high `z-index` also guarantees click/tap events land on the
+  filename even though the image covers the whole stage.
+- **Copy original URL.** Clicking or tapping the filename copies the **full
+  original S3 URL** (`getImageUrl(image.key)`), never the lightbox `blob:` URL.
+  Desktop-only path uses `navigator.clipboard.writeText` with `ok` / `fail`
+  visual feedback (`is-copied` / `is-copy-fail`); the span is keyboard
+  accessible (`role="button"` + Enter/Space).
+- **Rotate.** A toolbar button toggles `.lb-overlay.is-image-rotated`, applying
+  `rotate(90deg)` through the constrained `.lb-img` block.
 
 ## Memory Model
 
