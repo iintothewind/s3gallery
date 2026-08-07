@@ -289,6 +289,10 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
     imageOrientation !== null &&
     imageOrientation !== viewportOrientation;
 
+  // Copy-original-URL feedback state for the caption filename.
+  const [copyState, setCopyState] = useState("idle"); // idle | ok | fail
+  const copyTimerRef = useRef(null);
+
   const sizeMB = image?.size
     ? (image.size / (1024 * 1024)).toFixed(1) + " MB"
     : null;
@@ -296,6 +300,26 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
   // Stable ref to onClose — lets the touch effect run once without stale closures.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+
+  // Copy the full original S3 URL (not the lightbox blob URL) on click/tap.
+  const copyOriginalUrl = useCallback(async () => {
+    if (!image) return;
+    try {
+      await navigator.clipboard.writeText(getImageUrl(image.key));
+      setCopyState("ok");
+    } catch {
+      setCopyState("fail");
+    }
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopyState("idle"), 1600);
+  }, [image]);
+
+  // Clear the copy feedback timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
 
   const goNext = useCallback(() => {
     if (hasNext) onNavigate(currentIndex + 1);
@@ -454,7 +478,6 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
           initialSlide={currentIndex}
           spaceBetween={16}
           speed={300}
-          grabCursor
           onSwiper={(swiper) => { swiperRef.current = swiper; }}
           onSlideChange={(swiper) => {
             if (swiper.activeIndex !== currentIndex) {
@@ -488,7 +511,17 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
 
         <div className="lb-caption">
           <div className="lb-caption-left">
-            <span className="lb-filename" title={image.key}>{fileName}</span>
+            <span
+              className={`lb-filename ${copyState === "ok" ? "is-copied" : copyState === "fail" ? "is-copy-fail" : ""}`}
+              title={`Copy original URL · ${image.key}`}
+              role="button"
+              tabIndex={0}
+              aria-label={`Copy original URL for ${fileName}`}
+              onClick={copyOriginalUrl}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); copyOriginalUrl(); } }}
+            >
+              {copyState === "ok" ? "Copied ✓" : copyState === "fail" ? "Copy failed ✗" : fileName}
+            </span>
             <span className="lb-meta">
               {[
                 sizeMB,
