@@ -65,8 +65,14 @@ letterbox, which also plays well with the rotate button.
   Desktop-only path uses `navigator.clipboard.writeText` with `ok` / `fail`
   visual feedback (`is-copied` / `is-copy-fail`); the span is keyboard
   accessible (`role="button"` + Enter/Space).
-- **Rotate.** A toolbar button toggles `.lb-overlay.is-image-rotated`, applying
-  `rotate(90deg)` through the constrained `.lb-img` block.
+- **Rotate.** A toolbar button toggles `.lb-overlay.is-image-rotated`, which
+  transposes the `.lb-img` layout box to the viewport turned on its side
+  (`width: 100dvh`, `height: 100dvw`, with `vh`/`vw` fallbacks) before applying
+  `rotate(90deg)`. `object-fit: contain` therefore scales the picture inside a
+  full-screen-sized box and the rotation maps that box exactly back onto the
+  screen — reproducing the unrotated mode's fill-the-viewport behaviour. The
+  earlier `max-width: 84vh` / `max-height: 90vw` caps shrank the box before the
+  rotation, leaving the rotated image far smaller than the screen.
 
 ## Memory Model
 

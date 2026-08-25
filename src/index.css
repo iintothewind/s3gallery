@@ -385,14 +385,27 @@ code   { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
   display: block;
   user-select: none;
-  transition: transform 0.18s ease;
+  transition: transform 0.18s ease, width 0.18s ease, height 0.18s ease;
   transform-origin: center;
   cursor: default;
 }
 
 .lb-overlay.is-image-rotated .lb-img {
-  max-width: 84vh;
-  max-height: 90vw;
+  /* Transposed stage: while rotated, the layout box becomes the viewport
+     turned on its side (tall edge as width, short edge as height). That way
+     object-fit: contain first scales the picture inside a full-screen-sized
+     box, and rotate(90deg) then maps that box exactly back onto the screen —
+     reproducing the unrotated mode's "fill the viewport" behaviour. The old
+     max-width: 84vh / max-height: 90vw caps shrank this box before the
+     rotation, so the rotated image ended up far smaller than the screen.
+     dvh/dvw follow the dynamic viewport on mobile browsers; vh/vw are the
+     fallback for engines without dynamic-viewport units. */
+  width: 100vh;
+  width: 100dvh;
+  height: 100vw;
+  height: 100dvw;
+  max-width: none;
+  max-height: none;
   transform: rotate(90deg);
 }
 
