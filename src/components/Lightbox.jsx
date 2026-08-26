@@ -2,7 +2,7 @@ import { useEffect, useCallback, useRef, useState } from "react";
 import { Swiper, SwiperSlide } from "swiper/react";
 import { Virtual } from "swiper/modules";
 import "swiper/css";
-import { getImageUrl, hasImageKitEndpoint } from "../s3.js";
+import { getImageUrl, hasImageKitEndpoint, getMediaType } from "../s3.js";
 import { setCached } from "../imageCache.js";
 import {
   createLocalThumbnailBlobFromImage,
@@ -37,6 +37,13 @@ function formatBytes(bytes) {
   }
 
   return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function fmtMediaTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s < 10 ? "0" : ""}${s}`;
 }
 
 function getViewportOrientation() {
@@ -124,7 +131,12 @@ function SlideImage({ image, alt, onDims }) {
   const urlRef = useRef(null);
   const idleJobRef = useRef(null);
   const signalRef = useRef(null);
+  const videoRef = useRef(null);
   const imageKey = image.key;
+  const isVideo = getMediaType(image.key) === "video";
+  const [videoSrc, setVideoSrc] = useState(null);
+  const [videoState, setVideoState] = useState({ playing: true, muted: true, time: 0, duration: 0 });
+  const vidTouchRef = useRef({ x: 0, y: 0, swiped: false });
 
   useEffect(() => {
     const abort = new AbortController();
@@ -138,6 +150,21 @@ function SlideImage({ image, alt, onDims }) {
       total: image.size || 0,
       percent: image.size ? 0 : null,
     });
+
+    // Video: stream directly from S3 (no blob fetch) so playback starts
+    // immediately and decoded buffers are freed when the slide unmounts.
+    if (isVideo) {
+      setVideoSrc(getImageUrl(imageKey));
+      return () => {
+        cancelled = true;
+        abort.abort();
+        if (signalRef.current === abort.signal) signalRef.current = null;
+        if (videoRef.current) {
+          videoRef.current.pause();
+          videoRef.current = null;
+        }
+      };
+    }
 
     fetchBlobWithProgress(getImageUrl(imageKey), abort.signal, (nextProgress) => {
       if (!cancelled && !abort.signal.aborted) {
@@ -176,9 +203,9 @@ function SlideImage({ image, alt, onDims }) {
         urlRef.current = null;
       }
     };
-  }, [image, imageKey]);
+  }, [image, imageKey, isVideo]);
 
-  if (!blobUrl) {
+  if (!blobUrl && !videoSrc) {
     const progressText = progress.percent === null
       ? "Downloading original"
       : `Downloading original ${progress.percent}%`;
@@ -213,6 +240,100 @@ function SlideImage({ image, alt, onDims }) {
               {byteText && <div className="lb-loading-meta">{byteText}</div>}
             </>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // Video: streamed directly from S3, auto-plays muted. Native controls are
+  // intentionally NOT used — their mute button cannot be repositioned (it
+  // overlapped the close button) and we want horizontal swipe to seek.
+  if (isVideo && videoSrc) {
+    return (
+      <div className="lb-video-wrap">
+        <video
+          ref={videoRef}
+          src={videoSrc}
+          autoPlay
+          muted
+          playsInline
+          className="lb-img"
+          onClick={() => {
+            if (vidTouchRef.current.swiped) { vidTouchRef.current.swiped = false; return; }
+            const vid = videoRef.current;
+            if (!vid) return;
+            if (vid.paused) vid.play(); else vid.pause();
+          }}
+          onTouchStart={(e) => {
+            const t = e.touches[0];
+            vidTouchRef.current = { x: t.clientX, y: t.clientY, swiped: false };
+          }}
+          onTouchEnd={(e) => {
+            const t = e.changedTouches[0];
+            const dx = t.clientX - vidTouchRef.current.x;
+            const dy = t.clientY - vidTouchRef.current.y;
+            // Horizontal swipe → seek ±3s (suppress the tap-to-toggle click).
+            if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+              const vid = videoRef.current;
+              if (vid) {
+                const dur = vid.duration || 0;
+                vid.currentTime = Math.max(0, Math.min(dur, vid.currentTime + (dx > 0 ? 3 : -3)));
+              }
+              vidTouchRef.current.swiped = true;
+            }
+          }}
+          onLoadedMetadata={(e) => {
+            const vid = e.currentTarget;
+            const w = vid.videoWidth;
+            const h = vid.videoHeight;
+            if (w && h) onDims(w, h);
+            setVideoState((s) => ({
+              ...s,
+              duration: vid.duration || 0,
+              muted: vid.muted,
+              playing: !vid.paused,
+            }));
+          }}
+          onPlay={() => setVideoState((s) => ({ ...s, playing: true }))}
+          onPause={() => setVideoState((s) => ({ ...s, playing: false }))}
+          onTimeUpdate={(e) => setVideoState((s) => ({ ...s, time: e.currentTarget.currentTime }))}
+          onVolumeChange={(e) => setVideoState((s) => ({ ...s, muted: e.currentTarget.muted }))}
+        />
+        <div className="lb-video-controls" onClick={(e) => e.stopPropagation()}>
+          <button
+            className="lb-vbtn"
+            aria-label={videoState.playing ? "Pause" : "Play"}
+            onClick={() => { const vid = videoRef.current; if (vid) (vid.paused ? vid.play() : vid.pause()); }}
+          >
+            {videoState.playing ? "❚❚" : "▶"}
+          </button>
+          <button
+            className="lb-vbtn"
+            aria-label={videoState.muted ? "Unmute" : "Mute"}
+            onClick={() => { const vid = videoRef.current; if (vid) vid.muted = !vid.muted; }}
+          >
+            {videoState.muted ? "🔇" : "🔊"}
+          </button>
+          <input
+            className="lb-vseek"
+            type="range"
+            min={0}
+            max={videoState.duration || 0}
+            step={0.1}
+            value={Math.min(videoState.time, videoState.duration || 0)}
+            onChange={(e) => { const vid = videoRef.current; if (vid) vid.currentTime = Number(e.target.value); }}
+            aria-label="Seek"
+          />
+          <span className="lb-vtime">
+            {fmtMediaTime(videoState.time)} / {fmtMediaTime(videoState.duration)}
+          </span>
+          <button
+            className="lb-vbtn"
+            aria-label="Fullscreen"
+            onClick={() => { const vid = videoRef.current; if (vid?.requestFullscreen) vid.requestFullscreen(); }}
+          >
+            ⛶
+          </button>
         </div>
       </div>
     );
@@ -281,13 +402,15 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
   // Persists across slides so dimensions don't disappear when you swipe back.
   const [dimsMap, setDimsMap] = useState({});
   const currentDims = dimsMap[image?.key];
+  const currentMediaType = getMediaType(image?.key);
   const [viewportOrientation, setViewportOrientation] = useState(getViewportOrientation);
   const [isImageRotated, setIsImageRotated] = useState(false);
   const imageOrientation = getImageOrientation(currentDims);
   const showRotateButton =
     isMobileViewport() &&
     imageOrientation !== null &&
-    imageOrientation !== viewportOrientation;
+    imageOrientation !== viewportOrientation &&
+    currentMediaType !== "video";
 
   // Copy-original-URL feedback state for the caption filename.
   const [copyState, setCopyState] = useState("idle"); // idle | ok | fail
@@ -344,6 +467,13 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
   useEffect(() => {
     setIsImageRotated(false);
   }, [image?.key]);
+
+  // For video, disable Swiper's touch swiping so a horizontal swipe seeks the
+  // video (handled on the <video>) instead of navigating between slides.
+  useEffect(() => {
+    const sw = swiperRef.current;
+    if (sw) sw.allowTouchMove = currentMediaType !== "video";
+  }, [currentMediaType, currentIndex]);
 
   useEffect(() => {
     const onViewportChange = () => {

@@ -5,10 +5,16 @@ import {
   getImageUrl,
   getImageKitThumbnailUrl,
   getImageKitThumbnailSrcSet,
+  getMediaType,
 } from "../s3.js";
 import { getCached } from "../imageCache.js";
 import { parseDimensions } from "../imageDimensions.js";
-import { getThumbnailCacheKey, THUMBNAIL_READY_EVENT } from "../thumbnails.js";
+import {
+  getThumbnailCacheKey,
+  THUMBNAIL_READY_EVENT,
+  createLocalThumbnailBlobFromImage,
+  dispatchThumbnailReady,
+} from "../thumbnails.js";
 import { toHashPath } from "../App.jsx";
 import Lightbox from "./Lightbox.jsx";
 import Skeleton from "./Skeleton.jsx";
@@ -215,7 +221,9 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
     }
 
     async function loadPreview(images) {
-      const candidate = images[0];
+      // Prefer a non-video cover so folder tiles show an image preview
+      // rather than a video frame when one is available.
+      const candidate = images.find((img) => getMediaType(img.key) !== "video") || images[0];
       if (!candidate) {
         localStatus = "no-preview";
         return;
@@ -328,7 +336,7 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
           <span className="tile-name" title={name}>{name}</span>
           {count !== null && (
             <span className="tile-badge">
-              {count} img{count !== 1 ? "s" : ""}
+              {count} item{count !== 1 ? "s" : ""}
             </span>
           )}
         </div>
@@ -353,6 +361,9 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
 
 const ImageTile = memo(function ImageTile({ image, index, onClick }) {
   const fileName = image.key.split("/").pop();
+  const mediaType = getMediaType(image.key); // "video" | "animated" | "image"
+  const isVideoItem = mediaType === "video";
+  const isAnimatedItem = mediaType === "animated";
   const imageKitUrl = getImageKitThumbnailUrl(image.key);
   const imageKitSrcSet = imageKitUrl ? getImageKitThumbnailSrcSet(image.key) : null;
   const thumbnailCacheKey = getThumbnailCacheKey(image);
@@ -361,8 +372,11 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
   const [status,    setStatus]    = useState("idle");
   const [objectUrl, setObjectUrl] = useState(null);
   const [thumbnailUrl, setThumbnailUrl] = useState(null);
+  const [videoUrl,  setVideoUrl]  = useState(null);
   const ref        = useRef(null);
   const blobUrlRef = useRef(null);
+  const signalRef  = useRef(null);
+  const extractRef = useRef(null);
 
   useEffect(() => {
     const el = ref.current;
@@ -373,6 +387,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
     let cancelled   = false;
     const abort     = new AbortController();
     const { signal } = abort;
+    signalRef.current = signal;
 
     function revoke() {
       if (blobUrlRef.current) {
@@ -386,6 +401,14 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       localStatus = "loading";
       setStatus("loading");
 
+      // Video: first frame via <video preload="metadata"> (no canvas/blob).
+      if (isVideoItem) {
+        setVideoUrl(getImageUrl(image.key));
+        localStatus = "loaded";
+        setStatus("loaded");
+        return;
+      }
+
       if (imageKitUrl) {
         setThumbnailUrl(imageKitUrl);
         setStatus("loaded");
@@ -393,7 +416,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
         return;
       }
 
-      // ── 1. Local thumbnail cache ────────────────────────────────────────────
+      // 1. Local thumbnail cache
       const cached = await getCached(thumbnailCacheKey);
       if (cancelled) return;
       if (cached) {
@@ -405,7 +428,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
         return;
       }
 
-      // ── 2. Fallback direct S3 thumbnail or High-Res placeholder ────────────
+      // 2. Fallback direct S3 thumbnail or High-Res placeholder
       try {
         if (!await canDisplayOriginalAsThumbnail(image, signal)) {
           localStatus = "highres";
@@ -413,9 +436,17 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
           return;
         }
 
-        setThumbnailUrl(getImageUrl(image.key));
-        localStatus = "loaded";
-        setStatus("loaded");
+        if (isAnimatedItem) {
+          // Decode the original in a hidden <img>; the render path draws
+          // frame 0 to a canvas so the grid shows a STATIC first frame
+          // (playback happens only in the lightbox).
+          setThumbnailUrl(getImageUrl(image.key));
+          localStatus = "loading";
+        } else {
+          setThumbnailUrl(getImageUrl(image.key));
+          localStatus = "loaded";
+          setStatus("loaded");
+        }
       } catch (e) {
         if (!cancelled && e?.name !== "AbortError") {
           localStatus = "error";
@@ -436,6 +467,34 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       setStatus("loaded");
     }
 
+    // Extract a STATIC first frame for animated items: decode the original
+    // (loaded by a hidden <img> in the render path) and draw frame 0 to a
+    // canvas. Exposed via extractRef so the render path's onLoad can call it.
+    function extractStaticFrame(img) {
+      const sig = signalRef.current;
+      if (!sig || sig.aborted) return;
+      createLocalThumbnailBlobFromImage(img, sig)
+        .then((thumbnailBlob) => {
+          if (sig.aborted || signalRef.current !== sig) return;
+          revoke();
+          const url = URL.createObjectURL(thumbnailBlob);
+          blobUrlRef.current = url;
+          setObjectUrl(url);
+          setThumbnailUrl(null);
+          localStatus = "loaded";
+          setStatus("loaded");
+          setCached(thumbnailCacheKey, thumbnailBlob);
+          dispatchThumbnailReady(thumbnailCacheKey, thumbnailBlob);
+        })
+        .catch(() => {
+          // Fall back to the original (which animates) rather than error.
+          if (sig.aborted) return;
+          localStatus = "loaded";
+          setStatus("loaded");
+        });
+    }
+    extractRef.current = extractStaticFrame;
+
     window.addEventListener(THUMBNAIL_READY_EVENT, onThumbnailReady);
 
     watchLoad(el,   (on) => { if (on && localStatus === "idle") load(); });
@@ -444,6 +503,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
         revoke();
         setObjectUrl(null);
         setThumbnailUrl(null);
+        setVideoUrl(null);
         localStatus = "idle";
         setStatus("idle");
       }
@@ -452,12 +512,14 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
     return () => {
       cancelled = true;
       abort.abort();
+      signalRef.current = null;
+      extractRef.current = null;
       window.removeEventListener(THUMBNAIL_READY_EVENT, onThumbnailReady);
       stopLoad(el);
       stopUnload(el);
       revoke();
     };
-  }, [image, imageKitUrl, thumbnailCacheKey]);
+  }, [image, imageKitUrl, thumbnailCacheKey, isVideoItem, isAnimatedItem]);
 
   return (
     <div
@@ -466,14 +528,35 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       onClick={() => onClick(index)}
       role="button"
       tabIndex={0}
-      aria-label={`View image ${fileName}`}
+      aria-label={`View media ${fileName}`}
       onKeyDown={(e) => e.key === "Enter" && onClick(index)}
     >
       <div className="tile-inner">
         {(status === "idle" || status === "loading") && (
           <div className="tile-loading" />
         )}
-        {thumbnailUrl && status !== "error" && (
+
+        {isVideoItem && videoUrl && status !== "error" && (
+          <video
+            src={videoUrl}
+            preload="metadata"
+            muted
+            playsInline
+            className="tile-img"
+            onLoadedMetadata={(e) => {
+              // Nudge to the first presented frame so the grid thumbnail is
+              // not left blank/black before playback.
+              try { e.currentTarget.currentTime = 0.05; } catch {}
+            }}
+            onLoadedData={(e) => { e.currentTarget.pause(); }}
+          />
+        )}
+
+        {isAnimatedItem && thumbnailUrl && !objectUrl && status !== "error" && (
+          <img src={thumbnailUrl} alt="" aria-hidden="true" style={{ display: "none" }} onLoad={(e) => extractRef.current?.(e.currentTarget)} />
+        )}
+
+        {thumbnailUrl && status !== "error" && !isAnimatedItem && (
           <img
             src={thumbnailUrl}
             srcSet={imageKitSrcSet}
@@ -489,6 +572,15 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
         {status === "loaded" && objectUrl && (
           <img src={objectUrl} alt={fileName} className="tile-img" decoding="async" />
         )}
+
+        {(isVideoItem || isAnimatedItem) && status !== "error" && (
+          <div className="tile-play-badge" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          </div>
+        )}
+
         {status === "highres" && <HighResPlaceholder />}
         {status === "error" && (
           <div className="tile-error" aria-label="Failed to load">✕</div>
@@ -623,7 +715,7 @@ export default function Gallery({ prefix, onNavigate }) {
   if (sortedFolders.length === 0 && sortedImages.length === 0) {
     return (
       <div className="gallery">
-        <div className="status-box empty-box"><p>No images here.</p></div>
+        <div className="status-box empty-box"><p>No media here.</p></div>
       </div>
     );
   }
@@ -635,7 +727,7 @@ export default function Gallery({ prefix, onNavigate }) {
           <span className="gallery-stats">
             {sortedFolders.length > 0 &&
               `${sortedFolders.length} folder${sortedFolders.length !== 1 ? "s" : ""}, `}
-            {sortedImages.length} image{sortedImages.length !== 1 ? "s" : ""}
+            {sortedImages.length} item{sortedImages.length !== 1 ? "s" : ""}
           </span>
           <div className="sort-controls">
             <label className="sort-label">

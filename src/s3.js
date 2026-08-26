@@ -33,6 +33,47 @@ export function isImage(key) {
   return window.CONFIG.imageExtensions.some((ext) => lower.endsWith(ext));
 }
 
+const VIDEO_EXTENSIONS = window.CONFIG.videoExtensions || [".mp4", ".webm"];
+const ANIMATED_EXTENSIONS = window.CONFIG.animatedExtensions || [".gif", ".webp"];
+
+/**
+ * Returns true if the S3 key is a playable video (mp4/webm by default),
+ * based on CONFIG.videoExtensions.
+ */
+export function isVideo(key) {
+  const lower = key.toLowerCase();
+  return VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+/**
+ * Returns true if the S3 key is an animated image (gif/webp by default),
+ * based on CONFIG.animatedExtensions.
+ */
+export function isAnimated(key) {
+  const lower = key.toLowerCase();
+  return ANIMATED_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+/**
+ * Classifies a key for rendering: "video" | "animated" | "image" | null.
+ * Video and animated take precedence over the static-image check, so e.g. a
+ * .gif is reported as "animated" rather than "image".
+ */
+export function getMediaType(key) {
+  if (isVideo(key)) return "video";
+  if (isAnimated(key)) return "animated";
+  if (isImage(key)) return "image";
+  return null;
+}
+
+/**
+ * Any file the gallery can display: images, animated images, or videos.
+ * Used by listObjects() to decide which objects to include.
+ */
+export function isMedia(key) {
+  return isImage(key) || isVideo(key);
+}
+
 /**
  * Constructs the public HTTPS URL for an S3 object key.
  * Use this as <img src="..."> — no SDK call needed just to display an image.
@@ -141,7 +182,7 @@ export async function listObjects(prefix, signal) {
 
     for (const obj of resp.Contents ?? []) {
       if (!obj.Key || obj.Key === prefix) continue; // skip the prefix itself
-      if (isImage(obj.Key)) {
+      if (isMedia(obj.Key)) {
         images.push({ key: obj.Key, lastModified: obj.LastModified, size: obj.Size });
       }
     }

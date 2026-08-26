@@ -49,6 +49,8 @@ window.CONFIG = {
   localThumbnailConcurrency: 2,
   cacheMaxEntries: 2000,
   imageExtensions: [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".svg"],
+  videoExtensions: [".mp4", ".webm"],
+  animatedExtensions: [".gif", ".webp"],
 };
 ```
 

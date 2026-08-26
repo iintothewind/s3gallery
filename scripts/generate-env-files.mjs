@@ -93,6 +93,14 @@ window.CONFIG = {
     ".bmp",
     ".svg",
   ]))},
+  videoExtensions: ${jsValue(csvValue(env, "S3GALLERY_VIDEO_EXTENSIONS", [
+    ".mp4",
+    ".webm",
+  ]))},
+  animatedExtensions: ${jsValue(csvValue(env, "S3GALLERY_ANIMATED_EXTENSIONS", [
+    ".gif",
+    ".webp",
+  ]))},
   thumbnailWidths: ${jsValue(csvValue(env, "S3GALLERY_THUMBNAIL_WIDTHS", [
     "240",
     "360",
