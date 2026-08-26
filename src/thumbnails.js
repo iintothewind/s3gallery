@@ -87,8 +87,10 @@ async function renderThumbnailBlob(source) {
   const maxSize = window.CONFIG?.localThumbnailMaxSize ?? DEFAULT_THUMB_SIZE;
   const quality = window.CONFIG?.localThumbnailQuality ?? DEFAULT_THUMB_QUALITY;
 
-  const sourceWidth = source.width || source.naturalWidth;
-  const sourceHeight = source.height || source.naturalHeight;
+  // <video>: videoWidth/videoHeight are the intrinsic frame size.
+  // <img>: naturalWidth/naturalHeight (width/height are the laid-out size).
+  const sourceWidth = source.videoWidth || source.naturalWidth || source.width;
+  const sourceHeight = source.videoHeight || source.naturalHeight || source.height;
   if (!sourceWidth || !sourceHeight) {
     throw new Error("Image dimensions unavailable");
   }
@@ -100,6 +102,8 @@ async function renderThumbnailBlob(source) {
   canvas.width = width;
   canvas.height = height;
 
+  // drawImage on a <video> captures the video's currently presented frame.
+  // The caller is responsible for seeking it to the frame before calling.
   const ctx = canvas.getContext("2d", { alpha: false });
   if (!ctx) throw new Error("Canvas is unavailable");
   ctx.imageSmoothingEnabled = true;

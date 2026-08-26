@@ -2,6 +2,7 @@ import { useEffect, useCallback, useRef, useState } from "react";
 import { Swiper, SwiperSlide } from "swiper/react";
 import { Virtual } from "swiper/modules";
 import "swiper/css";
+import ArtPlayer from "artplayer";
 import { getImageUrl, hasImageKitEndpoint, getMediaType } from "../s3.js";
 import { setCached } from "../imageCache.js";
 import {
@@ -39,11 +40,16 @@ function formatBytes(bytes) {
   return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
-function fmtMediaTime(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s < 10 ? "0" : ""}${s}`;
+// Fully stop a <video> element so a torn-down ArtPlayer cannot keep playing
+// audio (avoids "two players / audio ahead of picture" in StrictMode dev).
+function stopVideo(video) {
+  if (!video) return;
+  try {
+    video.pause();
+    video.muted = true;
+    video.removeAttribute("src");
+    video.load();
+  } catch {}
 }
 
 function getViewportOrientation() {
@@ -120,7 +126,7 @@ async function fetchBlobWithProgress(url, signal, onProgress) {
  *   window, React's cleanup runs the revoke for every slide that scrolls out
  *   of view — keeping live decoded memory bounded to ≈ 5 slides at all times.
  */
-function SlideImage({ image, alt, onDims }) {
+function SlideImage({ image, alt, onDims, active, autoRotate }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [progress, setProgress] = useState({
     loaded: 0,
@@ -131,12 +137,10 @@ function SlideImage({ image, alt, onDims }) {
   const urlRef = useRef(null);
   const idleJobRef = useRef(null);
   const signalRef = useRef(null);
-  const videoRef = useRef(null);
+  const artRef = useRef(null);
+  const artContainerRef = useRef(null);
   const imageKey = image.key;
   const isVideo = getMediaType(image.key) === "video";
-  const [videoSrc, setVideoSrc] = useState(null);
-  const [videoState, setVideoState] = useState({ playing: true, muted: true, time: 0, duration: 0 });
-  const vidTouchRef = useRef({ x: 0, y: 0, swiped: false });
 
   useEffect(() => {
     const abort = new AbortController();
@@ -151,18 +155,14 @@ function SlideImage({ image, alt, onDims }) {
       percent: image.size ? 0 : null,
     });
 
-    // Video: stream directly from S3 (no blob fetch) so playback starts
-    // immediately and decoded buffers are freed when the slide unmounts.
+    // Video: stream directly from S3 (no blob fetch). The instance is created
+    // and destroyed by the dedicated ArtPlayer effect below; here we only
+    // cancel this effect's own signal so nothing leaks.
     if (isVideo) {
-      setVideoSrc(getImageUrl(imageKey));
       return () => {
         cancelled = true;
         abort.abort();
         if (signalRef.current === abort.signal) signalRef.current = null;
-        if (videoRef.current) {
-          videoRef.current.pause();
-          videoRef.current = null;
-        }
       };
     }
 
@@ -205,7 +205,57 @@ function SlideImage({ image, alt, onDims }) {
     };
   }, [image, imageKey, isVideo]);
 
-  if (!blobUrl && !videoSrc) {
+  // Create/destroy the ArtPlayer instance for video slides.
+  // Rules to avoid the "multiple audio sources / videos auto-play" mess:
+  //   - Only the CURRENTLY ACTIVE slide gets a player (Swiper may keep the
+  //     prev/next neighbors mounted; we must not create players for them).
+  //   - autoplay is OFF — playback starts only when the user presses play.
+  //   - On teardown we fully stop the element so no stale audio lingers and
+  //     the next slide starts from the same "not playing" state.
+  useEffect(() => {
+    if (!isVideo || !active) return;
+    if (artRef.current) {
+      stopVideo(artRef.current.video);
+      try { artRef.current.destroy(); } catch {}
+      artRef.current = null;
+    }
+
+    const container = artContainerRef.current;
+    if (!container) return;
+
+    let player;
+    try {
+      player = new ArtPlayer({
+        container,
+        url: getImageUrl(imageKey),
+        autoplay: false,
+        // No autoSize: the player should fill the .lb-video-wrap container
+        // (matching how images fill the lightbox stage).
+        muted: false,
+        playsInline: true,
+      });
+    } catch {
+      return;
+    }
+    artRef.current = player;
+
+    player.on("ready", () => {
+      const v = player.video;
+      if (v?.videoWidth && v?.videoHeight) onDims(v.videoWidth, v.videoHeight);
+    });
+
+    return () => {
+      const live = artRef.current;
+      if (live === player) {
+        if (live.video) stopVideo(live.video);
+        try { live.destroy(); } catch {}
+        artRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageKey, active]);
+
+  if (!isVideo && !blobUrl) {
     const progressText = progress.percent === null
       ? "Downloading original"
       : `Downloading original ${progress.percent}%`;
@@ -245,96 +295,14 @@ function SlideImage({ image, alt, onDims }) {
     );
   }
 
-  // Video: streamed directly from S3, auto-plays muted. Native controls are
-  // intentionally NOT used — their mute button cannot be repositioned (it
-  // overlapped the close button) and we want horizontal swipe to seek.
-  if (isVideo && videoSrc) {
+  // Video: streamed directly from S3, played via ArtPlayer (which provides the
+  // mobile touch gestures: horizontal swipe to seek, vertical for volume,
+  // double-tap to toggle, and its own native control bar). The container is
+  // always rendered for video so the ArtPlayer instance has a mounting point.
+  if (isVideo) {
     return (
-      <div className="lb-video-wrap">
-        <video
-          ref={videoRef}
-          src={videoSrc}
-          autoPlay
-          muted
-          playsInline
-          className="lb-img"
-          onClick={() => {
-            if (vidTouchRef.current.swiped) { vidTouchRef.current.swiped = false; return; }
-            const vid = videoRef.current;
-            if (!vid) return;
-            if (vid.paused) vid.play(); else vid.pause();
-          }}
-          onTouchStart={(e) => {
-            const t = e.touches[0];
-            vidTouchRef.current = { x: t.clientX, y: t.clientY, swiped: false };
-          }}
-          onTouchEnd={(e) => {
-            const t = e.changedTouches[0];
-            const dx = t.clientX - vidTouchRef.current.x;
-            const dy = t.clientY - vidTouchRef.current.y;
-            // Horizontal swipe → seek ±3s (suppress the tap-to-toggle click).
-            if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
-              const vid = videoRef.current;
-              if (vid) {
-                const dur = vid.duration || 0;
-                vid.currentTime = Math.max(0, Math.min(dur, vid.currentTime + (dx > 0 ? 3 : -3)));
-              }
-              vidTouchRef.current.swiped = true;
-            }
-          }}
-          onLoadedMetadata={(e) => {
-            const vid = e.currentTarget;
-            const w = vid.videoWidth;
-            const h = vid.videoHeight;
-            if (w && h) onDims(w, h);
-            setVideoState((s) => ({
-              ...s,
-              duration: vid.duration || 0,
-              muted: vid.muted,
-              playing: !vid.paused,
-            }));
-          }}
-          onPlay={() => setVideoState((s) => ({ ...s, playing: true }))}
-          onPause={() => setVideoState((s) => ({ ...s, playing: false }))}
-          onTimeUpdate={(e) => setVideoState((s) => ({ ...s, time: e.currentTarget.currentTime }))}
-          onVolumeChange={(e) => setVideoState((s) => ({ ...s, muted: e.currentTarget.muted }))}
-        />
-        <div className="lb-video-controls" onClick={(e) => e.stopPropagation()}>
-          <button
-            className="lb-vbtn"
-            aria-label={videoState.playing ? "Pause" : "Play"}
-            onClick={() => { const vid = videoRef.current; if (vid) (vid.paused ? vid.play() : vid.pause()); }}
-          >
-            {videoState.playing ? "❚❚" : "▶"}
-          </button>
-          <button
-            className="lb-vbtn"
-            aria-label={videoState.muted ? "Unmute" : "Mute"}
-            onClick={() => { const vid = videoRef.current; if (vid) vid.muted = !vid.muted; }}
-          >
-            {videoState.muted ? "🔇" : "🔊"}
-          </button>
-          <input
-            className="lb-vseek"
-            type="range"
-            min={0}
-            max={videoState.duration || 0}
-            step={0.1}
-            value={Math.min(videoState.time, videoState.duration || 0)}
-            onChange={(e) => { const vid = videoRef.current; if (vid) vid.currentTime = Number(e.target.value); }}
-            aria-label="Seek"
-          />
-          <span className="lb-vtime">
-            {fmtMediaTime(videoState.time)} / {fmtMediaTime(videoState.duration)}
-          </span>
-          <button
-            className="lb-vbtn"
-            aria-label="Fullscreen"
-            onClick={() => { const vid = videoRef.current; if (vid?.requestFullscreen) vid.requestFullscreen(); }}
-          >
-            ⛶
-          </button>
-        </div>
+      <div className={autoRotate ? "lb-video-wrap is-video-auto-rotated" : "lb-video-wrap"}>
+        <div ref={artContainerRef} className="lb-artplayer" />
       </div>
     );
   }
@@ -411,6 +379,8 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
     imageOrientation !== null &&
     imageOrientation !== viewportOrientation &&
     currentMediaType !== "video";
+  const canAutoRotateLandscapeVideo =
+    isMobileViewport() && viewportOrientation === "portrait";
 
   // Copy-original-URL feedback state for the caption filename.
   const [copyState, setCopyState] = useState("idle"); // idle | ok | fail
@@ -620,6 +590,12 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
               <SlideImage
                 image={img}
                 alt={img.key.split("/").pop()}
+                active={idx === currentIndex}
+                autoRotate={
+                  canAutoRotateLandscapeVideo &&
+                  getMediaType(img.key) === "video" &&
+                  (dimsMap[img.key]?.w ?? 0) > (dimsMap[img.key]?.h ?? 0)
+                }
                 onDims={(w, h) =>
                   setDimsMap((prev) => ({ ...prev, [img.key]: { w, h } }))
                 }

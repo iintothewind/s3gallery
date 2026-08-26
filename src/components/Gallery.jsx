@@ -7,7 +7,7 @@ import {
   getImageKitThumbnailSrcSet,
   getMediaType,
 } from "../s3.js";
-import { getCached } from "../imageCache.js";
+import { getCached, setCached } from "../imageCache.js";
 import { parseDimensions } from "../imageDimensions.js";
 import {
   getThumbnailCacheKey,
@@ -373,9 +373,9 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
   const [objectUrl, setObjectUrl] = useState(null);
   const [thumbnailUrl, setThumbnailUrl] = useState(null);
   const [videoUrl,  setVideoUrl]  = useState(null);
+  const [videoCors, setVideoCors] = useState(true);
   const ref        = useRef(null);
   const blobUrlRef = useRef(null);
-  const signalRef  = useRef(null);
   const extractRef = useRef(null);
 
   useEffect(() => {
@@ -385,9 +385,11 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
     // Local status mirror — avoids stale React-state closures inside observer callbacks.
     let localStatus = "idle";
     let cancelled   = false;
+    let loadGen     = 0;
+    let extractAbort = null;
+    let extractStarted = false;
     const abort     = new AbortController();
     const { signal } = abort;
-    signalRef.current = signal;
 
     function revoke() {
       if (blobUrlRef.current) {
@@ -396,14 +398,44 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       }
     }
 
+    function cancelExtract() {
+      extractAbort?.abort();
+      extractAbort = null;
+      extractStarted = false;
+    }
+
+    function evict() {
+      loadGen += 1;
+      cancelExtract();
+      revoke();
+      setObjectUrl(null);
+      setThumbnailUrl(null);
+      setVideoUrl(null);
+      setVideoCors(true);
+      localStatus = "idle";
+      setStatus("idle");
+    }
+
     async function load() {
       if (cancelled || localStatus !== "idle") return;
+      const gen = ++loadGen;
       localStatus = "loading";
       setStatus("loading");
 
-      // Video: first frame via <video preload="metadata"> (no canvas/blob).
+      // Video: cached first-frame thumbnail if present. Otherwise show an
+      // in-tile <video> (paused on the first frame) so the grid is never
+      // blank, and draw that same element to canvas for IndexedDB.
       if (isVideoItem) {
-        setVideoUrl(getImageUrl(image.key));
+        const cached = await getCached(thumbnailCacheKey);
+        if (cancelled || gen !== loadGen) return;
+        if (cached) {
+          const url = URL.createObjectURL(cached);
+          blobUrlRef.current = url;
+          setObjectUrl(url);
+        } else {
+          setVideoCors(true);
+          setVideoUrl(getImageUrl(image.key));
+        }
         localStatus = "loaded";
         setStatus("loaded");
         return;
@@ -418,7 +450,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
 
       // 1. Local thumbnail cache
       const cached = await getCached(thumbnailCacheKey);
-      if (cancelled) return;
+      if (cancelled || gen !== loadGen) return;
       if (cached) {
         const url = URL.createObjectURL(cached);
         blobUrlRef.current = url;
@@ -431,11 +463,13 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       // 2. Fallback direct S3 thumbnail or High-Res placeholder
       try {
         if (!await canDisplayOriginalAsThumbnail(image, signal)) {
+          if (cancelled || gen !== loadGen) return;
           localStatus = "highres";
           setStatus("highres");
           return;
         }
 
+        if (cancelled || gen !== loadGen) return;
         if (isAnimatedItem) {
           // Decode the original in a hidden <img>; the render path draws
           // frame 0 to a canvas so the grid shows a STATIC first frame
@@ -448,7 +482,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
           setStatus("loaded");
         }
       } catch (e) {
-        if (!cancelled && e?.name !== "AbortError") {
+        if (!cancelled && gen === loadGen && e?.name !== "AbortError") {
           localStatus = "error";
           setStatus("error");
         }
@@ -457,62 +491,64 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
 
     function onThumbnailReady(e) {
       if (e.detail?.cacheKey !== thumbnailCacheKey || !e.detail?.blob) return;
+      if (cancelled || localStatus === "idle") return;
 
       revoke();
       const url = URL.createObjectURL(e.detail.blob);
       blobUrlRef.current = url;
       setObjectUrl(url);
       setThumbnailUrl(null);
+      setVideoUrl(null);
       localStatus = "loaded";
       setStatus("loaded");
     }
 
-    // Extract a STATIC first frame for animated items: decode the original
-    // (loaded by a hidden <img> in the render path) and draw frame 0 to a
-    // canvas. Exposed via extractRef so the render path's onLoad can call it.
-    function extractStaticFrame(img) {
-      const sig = signalRef.current;
-      if (!sig || sig.aborted) return;
-      createLocalThumbnailBlobFromImage(img, sig)
+    // Draw the currently presented frame of an <img> or in-tile <video> to a
+    // canvas and cache it. On failure the caller keeps its visible fallback
+    // (animated original, or the paused <video>).
+    function extractFrame(source) {
+      if (cancelled || extractStarted) return;
+      extractStarted = true;
+      extractAbort = new AbortController();
+      const sig = extractAbort.signal;
+      const gen = loadGen;
+      createLocalThumbnailBlobFromImage(source, sig)
         .then((thumbnailBlob) => {
-          if (sig.aborted || signalRef.current !== sig) return;
+          if (sig.aborted || cancelled || gen !== loadGen) return;
           revoke();
           const url = URL.createObjectURL(thumbnailBlob);
           blobUrlRef.current = url;
           setObjectUrl(url);
           setThumbnailUrl(null);
+          setVideoUrl(null);
           localStatus = "loaded";
           setStatus("loaded");
           setCached(thumbnailCacheKey, thumbnailBlob);
           dispatchThumbnailReady(thumbnailCacheKey, thumbnailBlob);
         })
         .catch(() => {
-          // Fall back to the original (which animates) rather than error.
           if (sig.aborted) return;
+          extractStarted = false;
           localStatus = "loaded";
           setStatus("loaded");
         });
     }
-    extractRef.current = extractStaticFrame;
+    extractRef.current = extractFrame;
 
     window.addEventListener(THUMBNAIL_READY_EVENT, onThumbnailReady);
 
     watchLoad(el,   (on) => { if (on && localStatus === "idle") load(); });
     watchUnload(el, (on) => {
-      if (!on && localStatus === "loaded") {
-        revoke();
-        setObjectUrl(null);
-        setThumbnailUrl(null);
-        setVideoUrl(null);
-        localStatus = "idle";
-        setStatus("idle");
+      if (!on && (localStatus === "loaded" || localStatus === "loading")) {
+        evict();
       }
     });
 
     return () => {
       cancelled = true;
+      loadGen += 1;
+      cancelExtract();
       abort.abort();
-      signalRef.current = null;
       extractRef.current = null;
       window.removeEventListener(THUMBNAIL_READY_EVENT, onThumbnailReady);
       stopLoad(el);
@@ -536,19 +572,34 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
           <div className="tile-loading" />
         )}
 
-        {isVideoItem && videoUrl && status !== "error" && (
+        {isVideoItem && !objectUrl && !videoUrl && status !== "error" && (
+          <div className="tile-video-placeholder" aria-hidden="true" />
+        )}
+
+        {isVideoItem && !objectUrl && videoUrl && status !== "error" && (
           <video
+            key={videoCors ? "cors" : "nocors"}
             src={videoUrl}
-            preload="metadata"
+            crossOrigin={videoCors ? "anonymous" : undefined}
+            preload="auto"
             muted
             playsInline
             className="tile-img"
             onLoadedMetadata={(e) => {
-              // Nudge to the first presented frame so the grid thumbnail is
-              // not left blank/black before playback.
-              try { e.currentTarget.currentTime = 0.05; } catch {}
+              const vid = e.currentTarget;
+              try {
+                const t = Number.isFinite(vid.duration) && vid.duration > 0
+                  ? Math.min(0.05, vid.duration / 10)
+                  : 0.05;
+                vid.currentTime = t;
+              } catch {}
             }}
+            onSeeked={(e) => extractRef.current?.(e.currentTarget)}
             onLoadedData={(e) => { e.currentTarget.pause(); }}
+            onError={() => {
+              if (videoCors) setVideoCors(false);
+              else setStatus("error");
+            }}
           />
         )}
 
