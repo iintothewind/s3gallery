@@ -218,6 +218,7 @@ function HighResPlaceholder() {
 const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
   // preview: null = not loaded / evicted, string = blob URL
   const [preview, setPreview] = useState(null);
+  const [videoCover, setVideoCover] = useState(false);
   const [count,   setCount]   = useState(null);
   const ref        = useRef(null);
   const blobUrlRef = useRef(null);
@@ -249,6 +250,15 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
       const candidate = images.find((img) => getMediaType(img.key) !== "video") || images[0];
       if (!candidate) {
         localStatus = "no-preview";
+        return;
+      }
+
+      // Fallback to a video-only folder: show the same placeholder the
+      // image tiles use instead of feeding a video URL to an <img> (which
+      // would render a broken image).
+      if (getMediaType(candidate.key) === "video") {
+        setVideoCover(true);
+        localStatus = "loaded";
         return;
       }
 
@@ -318,6 +328,7 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
       if (!on && localStatus === "loaded") {
         revoke();
         setPreview(null);
+        setVideoCover(false);
         localStatus = "idle";
       }
     });
@@ -342,7 +353,17 @@ const FolderTile = memo(function FolderTile({ prefix, name, onClick }) {
       onKeyDown={(e) => e.key === "Enter" && onClick(prefix)}
     >
       <div className="tile-inner">
-        {preview ? (
+        {videoCover ? (
+          // Video-only folder: no <img>-decodable cover exists.
+          <>
+            <div className="tile-video-placeholder" aria-hidden="true" />
+            <div className="tile-play-badge" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            </div>
+          </>
+        ) : preview ? (
           <img
             src={preview}
             alt=""
@@ -395,6 +416,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
   const [status,    setStatus]    = useState("idle");
   const [objectUrl, setObjectUrl] = useState(null);
   const [thumbnailUrl, setThumbnailUrl] = useState(null);
+  const [extractFailed, setExtractFailed] = useState(false);
   const [videoUrl,  setVideoUrl]  = useState(null);
   const [videoCors, setVideoCors] = useState(true);
   const ref        = useRef(null);
@@ -435,6 +457,7 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
       setThumbnailUrl(null);
       setVideoUrl(null);
       setVideoCors(true);
+      setExtractFailed(false);
       localStatus = "idle";
       setStatus("idle");
     }
@@ -554,6 +577,10 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
           extractStarted = false;
           localStatus = "loaded";
           setStatus("loaded");
+          // Animated tile: canvas extraction failed (e.g. CORS-tainted canvas
+          // when the S3 bucket sends no Access-Control-Allow-Origin). Fall
+          // back to showing the animated original instead of a blank tile.
+          if (isAnimatedItem) setExtractFailed(true);
         });
     }
     extractRef.current = extractFrame;
@@ -627,7 +654,19 @@ const ImageTile = memo(function ImageTile({ image, index, onClick }) {
         )}
 
         {isAnimatedItem && thumbnailUrl && !objectUrl && status !== "error" && (
-          <img src={thumbnailUrl} alt="" aria-hidden="true" style={{ display: "none" }} onLoad={(e) => extractRef.current?.(e.currentTarget)} />
+          extractFailed ? (
+            // Static-frame extraction failed (e.g. CORS-tainted canvas) —
+            // show the animated original instead of a blank tile.
+            <img
+              src={thumbnailUrl}
+              alt={fileName}
+              className="tile-img"
+              loading="lazy"
+              decoding="async"
+            />
+          ) : (
+            <img src={thumbnailUrl} alt="" aria-hidden="true" style={{ display: "none" }} onLoad={(e) => extractRef.current?.(e.currentTarget)} />
+          )
         )}
 
         {thumbnailUrl && status !== "error" && !isAnimatedItem && (
@@ -685,12 +724,16 @@ export default function Gallery({ prefix, onNavigate }) {
   const [lbIndex,   setLbIndex]   = useState(null);
   const [gridRef, gridWidth] = useElementWidth();
 
-  useEffect(() => {
-    localStorage.setItem(VIDEO_MUTED_KEY, String(videoMuted));
-  }, [videoMuted]);
-  useEffect(() => {
-    localStorage.setItem(VIDEO_LOOP_KEY, String(videoLoop));
-  }, [videoLoop]);
+  // Persist the choice only when the visitor explicitly changes it — the env
+  // defaults (CONFIG.videoMuted / videoLoop) must keep applying until then.
+  function storeVideoMuted(value) {
+    try { localStorage.setItem(VIDEO_MUTED_KEY, String(value)); } catch {}
+    setVideoMuted(value);
+  }
+  function storeVideoLoop(value) {
+    try { localStorage.setItem(VIDEO_LOOP_KEY, String(value)); } catch {}
+    setVideoLoop(value);
+  }
 
   // Reload whenever the prefix changes
   useEffect(() => {
@@ -844,7 +887,7 @@ export default function Gallery({ prefix, onNavigate }) {
               <select
                 className="sort-select"
                 value={videoMuted ? "on" : "off"}
-                onChange={(e) => setVideoMuted(e.target.value === "on")}
+                onChange={(e) => storeVideoMuted(e.target.value === "on")}
               >
                 <option value="off">Off</option>
                 <option value="on">On</option>
@@ -855,7 +898,7 @@ export default function Gallery({ prefix, onNavigate }) {
               <select
                 className="sort-select"
                 value={videoLoop ? "on" : "off"}
-                onChange={(e) => setVideoLoop(e.target.value === "on")}
+                onChange={(e) => storeVideoLoop(e.target.value === "on")}
               >
                 <option value="off">Off</option>
                 <option value="on">On</option>

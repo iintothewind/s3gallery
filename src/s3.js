@@ -71,7 +71,7 @@ export function getMediaType(key) {
  * Used by listObjects() to decide which objects to include.
  */
 export function isMedia(key) {
-  return isImage(key) || isVideo(key);
+  return isImage(key) || isVideo(key) || isAnimated(key);
 }
 
 /**
