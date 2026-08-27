@@ -530,6 +530,12 @@ code   { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
   background: transparent;
 }
 
+/* Native loop never pauses; hide the center play mask so a one-frame
+   ended/pause cannot flash the big play button between cycles. */
+.lb-video-wrap.is-looping .art-mask {
+  display: none !important;
+}
+
 /* Prev / next */
 .lb-nav {
   position: fixed;

@@ -27,6 +27,29 @@ const MOBILE_MIN_TILE_WIDTH = 130;
 const SIZE_LIMIT_BYTES = window.CONFIG.thumbnailMaxBytes ?? 1.2 * 1024 * 1024;
 const MAX_PX_W = window.CONFIG.thumbnailMaxWidth ?? 1920;
 const MAX_PX_H = window.CONFIG.thumbnailMaxHeight ?? 1920;
+const VIDEO_MUTED_KEY = "gallery-video-muted";
+const VIDEO_LOOP_KEY = "gallery-video-loop";
+
+function configBoolean(key, fallback) {
+  const value = window.CONFIG?.[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "off"].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+function readStoredFlag(storageKey, configKey) {
+  try {
+    const stored = localStorage.getItem(storageKey);
+    if (stored === "true") return true;
+    if (stored === "false") return false;
+  } catch {}
+  return configBoolean(configKey, false);
+}
 
 async function canDisplayOriginalAsThumbnail(image, signal) {
   if (image.size > SIZE_LIMIT_BYTES) return false;
@@ -653,8 +676,21 @@ export default function Gallery({ prefix, onNavigate }) {
   const [images,    setImages]    = useState([]);
   const [sortBy,    setSortBy]    = useState("name");  // "name" | "date"
   const [sortOrder, setSortOrder] = useState("desc");  // "asc"  | "desc"
+  const [videoMuted, setVideoMuted] = useState(
+    () => readStoredFlag(VIDEO_MUTED_KEY, "videoMuted")
+  );
+  const [videoLoop, setVideoLoop] = useState(
+    () => readStoredFlag(VIDEO_LOOP_KEY, "videoLoop")
+  );
   const [lbIndex,   setLbIndex]   = useState(null);
   const [gridRef, gridWidth] = useElementWidth();
+
+  useEffect(() => {
+    localStorage.setItem(VIDEO_MUTED_KEY, String(videoMuted));
+  }, [videoMuted]);
+  useEffect(() => {
+    localStorage.setItem(VIDEO_LOOP_KEY, String(videoLoop));
+  }, [videoLoop]);
 
   // Reload whenever the prefix changes
   useEffect(() => {
@@ -803,6 +839,28 @@ export default function Gallery({ prefix, onNavigate }) {
                 <option value="desc">{sortBy === "name" ? "Z → A" : "Newest first"}</option>
               </select>
             </label>
+            <label className="sort-label">
+              Mute:{" "}
+              <select
+                className="sort-select"
+                value={videoMuted ? "on" : "off"}
+                onChange={(e) => setVideoMuted(e.target.value === "on")}
+              >
+                <option value="off">Off</option>
+                <option value="on">On</option>
+              </select>
+            </label>
+            <label className="sort-label">
+              Loop:{" "}
+              <select
+                className="sort-select"
+                value={videoLoop ? "on" : "off"}
+                onChange={(e) => setVideoLoop(e.target.value === "on")}
+              >
+                <option value="off">Off</option>
+                <option value="on">On</option>
+              </select>
+            </label>
           </div>
         </div>
       )}
@@ -854,6 +912,8 @@ export default function Gallery({ prefix, onNavigate }) {
           currentIndex={lbIndex}
           onClose={() => setLbIndex(null)}
           onNavigate={setLbIndex}
+          videoMuted={videoMuted}
+          videoLoop={videoLoop}
         />
       )}
     </div>

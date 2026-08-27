@@ -1,7 +1,8 @@
 # s3gallery
 
-A static image gallery that browses images from a public S3 bucket using the
-AWS SDK v3 with **anonymous (unsigned) requests** — no credentials required.
+A static media gallery that browses a public S3 bucket using the AWS SDK v3
+with **anonymous (unsigned) requests** — no credentials required. It displays
+images, animated GIF/WebP, and mp4/webm video.
 
 ## Configuration
 
@@ -51,6 +52,8 @@ window.CONFIG = {
   imageExtensions: [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".svg"],
   videoExtensions: [".mp4", ".webm"],
   animatedExtensions: [".gif", ".webp"],
+  videoMuted: false,               // first-visit default for the toolbar Mute control
+  videoLoop: false,                // first-visit default for the toolbar Loop control
 };
 ```
 
@@ -92,6 +95,23 @@ If `imageKitEndpoint` is empty, the fallback path is:
 
 Only small generated thumbnails are written to IndexedDB. Original images rely
 on normal HTTP caching and are not stored in IndexedDB.
+
+Video tiles skip ImageKit. They use a cached first-frame JPEG/WebP when one
+exists; otherwise the grid shows a paused in-tile `<video>` and captures that
+frame into IndexedDB. Playback happens only in the lightbox.
+
+### Video mute, loop, and autoplay
+
+The gallery toolbar (same row as Sort / Order) has **Mute** and **Loop**
+selects. The visitor's choice is stored in `localStorage`. `videoMuted` and
+`videoLoop` in `config.js` (or `S3GALLERY_VIDEO_MUTED` /
+`S3GALLERY_VIDEO_LOOP` in `.env.local`) are used only on the first visit,
+before anything is stored.
+
+Opening a video tile starts playback. Loop uses the native `<video loop>`
+attribute so the clip does not pause between cycles. If **Mute** is off, some
+browsers still block the first unmuted autoplay — tap play once; looping after
+that should continue without the center play button.
 
 ## Development
 
@@ -212,11 +232,14 @@ Or in the AWS Console: **S3 → your bucket → Permissions → Cross-origin res
 
 | Feature | Notes |
 | ------- | ----- |
-| Folder & image thumbnails | Unified grid; folders show a preview of their first image |
+| Folder & image thumbnails | Unified grid; folders show a preview of their first non-video item when possible |
+| Video & animated media | mp4/webm in the lightbox via ArtPlayer; GIF/WebP show a static first frame in the grid |
 | Lightbox | Full-screen viewer; the original fills the viewport (contained, longest edge touches the stage edge) |
 | Floating caption | Filename, meta, and `N / total` counter pinned to the bottom, always visible (mobile included) |
 | Copy original URL | Click the filename to copy the full original S3 URL to the clipboard |
 | Rotate image | Rotate a photo 90° in the lightbox |
+| Landscape video auto-rotate | On a phone held in portrait, a landscape video is rotated to fill the screen |
+| Video mute / loop | Gallery toolbar next to Sort/Order; remembered in `localStorage`. `videoMuted` / `videoLoop` in `config.js` are first-visit defaults |
 | Keyboard navigation | `←` / `→` in lightbox, `Esc` to close |
 | Breadcrumb | Clickable path back to any parent folder |
 | Dark / light theme | Toggled from the header; preference saved to `localStorage` |

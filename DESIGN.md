@@ -1,18 +1,23 @@
 # Design Notes
 
 This gallery is optimized for browsing S3 prefixes that contain hundreds of
-images, especially on memory-constrained mobile browsers.
+images, videos, and animated files, especially on memory-constrained mobile
+browsers.
 
 ## Runtime Shape
 
 - `public/config.js` is loaded at runtime and is not bundled. S3 deployment can
   update configuration without rebuilding the app.
-- `src/s3.js` owns public S3 listing, direct S3 image URLs, and ImageKit
-  thumbnail URL construction.
+- `src/s3.js` owns public S3 listing, direct S3 object URLs, media-type
+  classification (`image` / `animated` / `video`), and ImageKit thumbnail URL
+  construction.
 - `src/components/Gallery.jsx` renders folder and image tiles with a virtual
-  row grid.
-- `src/components/Lightbox.jsx` renders originals with Swiper's virtual slides;
-  the originals fill the stage and the caption floats over the bottom edge.
+  row grid, plus the Sort / Mute / Loop toolbar.
+- `src/components/Lightbox.jsx` renders originals with Swiper's virtual slides.
+  Images fill the stage as blob URLs; videos play through ArtPlayer. The
+  caption floats over the bottom edge.
+- `src/thumbnails.js` draws an `<img>` or in-tile `<video>` frame to a small
+  canvas and stores that blob in IndexedDB.
 - `src/imageCache.js` stores only generated local thumbnail blobs in IndexedDB.
 
 ## Thumbnail Pipeline
@@ -40,6 +45,13 @@ Fallback path, when `imageKitEndpoint` is empty:
    thumbnail blob to IndexedDB.
 6. Visible tiles listen for the thumbnail-ready event and replace placeholders
    or direct original thumbnails immediately.
+
+Video tiles do not use ImageKit. They look up a cached first-frame thumbnail,
+or show a paused in-tile `<video>` (`crossOrigin="anonymous"`, with a no-CORS
+retry if that fails) and extract that frame into IndexedDB. Scrolling a tile
+out of the unload margin aborts in-flight extraction and tears down the video
+element. Animated GIF/WebP decode in a hidden `<img>` and keep a static frame
+0 in the grid; playback is lightbox-only.
 
 Legacy IndexedDB entries that are not `thumb:` keys are removed during cache
 cleanup. This prevents older builds that stored original blobs from leaving
@@ -73,6 +85,29 @@ letterbox, which also plays well with the rotate button.
   screen — reproducing the unrotated mode's fill-the-viewport behaviour. The
   earlier `max-width: 84vh` / `max-height: 90vw` caps shrank the box before the
   rotation, leaving the rotated image far smaller than the screen.
+- **Video playback (ArtPlayer).** Only the active Swiper slide mounts an
+  ArtPlayer instance. Neighbors may stay in the DOM, but they do not get a
+  player. Teardown calls `pause`, clears `src`, and `load()` so leftover audio
+  cannot keep playing. Opening a video tile starts playback (`autoplay: true`).
+  Unmuted autoplay can still be blocked until the viewer taps once.
+- **Mute / Loop toolbar.** Mute and Loop sit on the gallery toolbar next to
+  Sort/Order and persist in `localStorage` (`gallery-video-muted`,
+  `gallery-video-loop`). `window.CONFIG.videoMuted` / `videoLoop` apply only
+  when those keys are unset.
+- **Seamless loop.** Loop is the native `<video loop>` attribute, not
+  ArtPlayer's `ended → seek 0 → play` path. Native loop never pauses, so the
+  center play button does not flash between cycles and unmuted replay is not
+  treated as a new autoplay. `.lb-video-wrap.is-looping .art-mask` is hidden
+  as a backstop. If a browser still fires `ended`, the lightbox seeks to 0 and
+  plays immediately.
+- **Landscape video auto-rotate.** On a coarse/touch portrait viewport, a
+  video whose own stored dimensions are wider than tall gets
+  `.is-video-auto-rotated` (layout box `100dvh × 100dvw`, then `rotate(90deg)`).
+  Rotation is computed per slide from that slide's dimensions so a neighboring
+  portrait video is not rotated during a swipe.
+- **Video mute / loop vs grid tiles.** Grid tiles always use a muted, paused
+  `<video>` only to capture a first-frame thumbnail. Toolbar Mute/Loop do not
+  apply there.
 
 ## Memory Model
 
@@ -83,9 +118,11 @@ letterbox, which also plays well with the rotate button.
 - Blob URLs created from IndexedDB thumbnails are revoked when tiles leave the
   unload margin or unmount.
 - Lightbox originals are fetched as blob URLs and revoked when Swiper's virtual
-  slide unmounts.
-- In-flight S3 listing and thumbnail safety range requests are aborted when the
-  user leaves a prefix or tile.
+  slide unmounts. Video slides stream from S3 and destroy the ArtPlayer instance
+  (and stop the media element) when they become inactive or unmount.
+- In-flight S3 listing, thumbnail safety range requests, and video-frame
+  extraction are aborted when the user leaves a prefix or a tile scrolls out of
+  the unload margin.
 - Pending local thumbnail jobs are removed from the queue if their slide is
   unmounted before the job starts.
 
@@ -119,7 +156,8 @@ IndexedDB is intentionally a thumbnail cache only:
 - If ImageKit is enabled, verify that its origin root matches `rootPrefix`.
   With the current design, `rootPrefix` is stripped before building the
   ImageKit path.
-- S3 CORS must allow browser `ListObjectsV2`, direct image fetches, and range
+- S3 CORS must allow browser `ListObjectsV2`, direct image and video fetches,
+  canvas frame capture from `<video>` (`crossOrigin="anonymous"`), and range
   requests used by the fallback thumbnail safety check.
 - The app assumes the S3 bucket is public-read for listing and object reads; no
   AWS credentials are used in the browser.

@@ -50,6 +50,15 @@ function csvValue(env, key, fallback) {
     .filter(Boolean);
 }
 
+function boolValue(env, key, fallback) {
+  const raw = env[key];
+  if (raw == null || String(raw).trim() === "") return fallback;
+  const normalized = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
 function jsValue(value) {
   return JSON.stringify(value);
 }
@@ -115,6 +124,8 @@ window.CONFIG = {
   localThumbnailQuality: ${numberValue(env, "S3GALLERY_LOCAL_THUMBNAIL_QUALITY", 0.8)},
   localThumbnailConcurrency: ${numberValue(env, "S3GALLERY_LOCAL_THUMBNAIL_CONCURRENCY", 2)},
   cacheMaxEntries: ${numberValue(env, "S3GALLERY_CACHE_MAX_ENTRIES", 2000)},
+  videoMuted: ${boolValue(env, "S3GALLERY_VIDEO_MUTED", false)},
+  videoLoop: ${boolValue(env, "S3GALLERY_VIDEO_LOOP", false)},
 };
 `;
 

@@ -52,6 +52,18 @@ function stopVideo(video) {
   } catch {}
 }
 
+function hideArtMask(player) {
+  try { player.mask.show = false; } catch {}
+}
+
+function startArtPlayback(player) {
+  hideArtMask(player);
+  try {
+    const result = player.play();
+    if (result && typeof result.catch === "function") result.catch(() => {});
+  } catch {}
+}
+
 function getViewportOrientation() {
   if (typeof window === "undefined") return "portrait";
   return window.innerWidth >= window.innerHeight ? "landscape" : "portrait";
@@ -126,7 +138,7 @@ async function fetchBlobWithProgress(url, signal, onProgress) {
  *   window, React's cleanup runs the revoke for every slide that scrolls out
  *   of view — keeping live decoded memory bounded to ≈ 5 slides at all times.
  */
-function SlideImage({ image, alt, onDims, active, autoRotate }) {
+function SlideImage({ image, alt, onDims, active, autoRotate, videoMuted, videoLoop }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [progress, setProgress] = useState({
     loaded: 0,
@@ -209,9 +221,12 @@ function SlideImage({ image, alt, onDims, active, autoRotate }) {
   // Rules to avoid the "multiple audio sources / videos auto-play" mess:
   //   - Only the CURRENTLY ACTIVE slide gets a player (Swiper may keep the
   //     prev/next neighbors mounted; we must not create players for them).
-  //   - autoplay is OFF — playback starts only when the user presses play.
-  //   - On teardown we fully stop the element so no stale audio lingers and
-  //     the next slide starts from the same "not playing" state.
+  //   - Opening a tile is a play intent: we autoplay. Unmuted autoplay may
+  //     still be blocked by the browser until the viewer taps once.
+  //   - Loop uses the native <video loop> attribute so playback never pauses
+  //     at the end (ArtPlayer's loop option seeks+plays and flashes the
+  //     center play button; unmuted replay can also be blocked).
+  //   - On teardown we fully stop the element so no stale audio lingers.
   useEffect(() => {
     if (!isVideo || !active) return;
     if (artRef.current) {
@@ -228,11 +243,19 @@ function SlideImage({ image, alt, onDims, active, autoRotate }) {
       player = new ArtPlayer({
         container,
         url: getImageUrl(imageKey),
-        autoplay: false,
+        autoplay: true,
         // No autoSize: the player should fill the .lb-video-wrap container
         // (matching how images fill the lightbox stage).
-        muted: false,
+        muted: videoMuted,
+        // Native loop is applied on the element; ArtPlayer's own loop
+        // (ended → seek 0 → play) is what made the play button flash.
+        loop: false,
         playsInline: true,
+        moreVideoAttr: {
+          playsInline: true,
+          preload: "auto",
+          ...(videoLoop ? { loop: true } : {}),
+        },
       });
     } catch {
       return;
@@ -241,7 +264,20 @@ function SlideImage({ image, alt, onDims, active, autoRotate }) {
 
     player.on("ready", () => {
       const v = player.video;
-      if (v?.videoWidth && v?.videoHeight) onDims(v.videoWidth, v.videoHeight);
+      if (!v) return;
+      v.muted = videoMuted;
+      v.loop = videoLoop;
+      if (v.videoWidth && v.videoHeight) onDims(v.videoWidth, v.videoHeight);
+      startArtPlayback(player);
+    });
+
+    player.on("video:playing", () => hideArtMask(player));
+
+    // Fallback if a browser still fires ended despite native loop.
+    player.on("video:ended", () => {
+      if (!videoLoop) return;
+      try { player.seek = 0; } catch {}
+      startArtPlayback(player);
     });
 
     return () => {
@@ -253,7 +289,7 @@ function SlideImage({ image, alt, onDims, active, autoRotate }) {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imageKey, active]);
+  }, [imageKey, active, videoMuted, videoLoop]);
 
   if (!isVideo && !blobUrl) {
     const progressText = progress.percent === null
@@ -301,7 +337,13 @@ function SlideImage({ image, alt, onDims, active, autoRotate }) {
   // always rendered for video so the ArtPlayer instance has a mounting point.
   if (isVideo) {
     return (
-      <div className={autoRotate ? "lb-video-wrap is-video-auto-rotated" : "lb-video-wrap"}>
+      <div
+        className={[
+          "lb-video-wrap",
+          autoRotate ? "is-video-auto-rotated" : "",
+          videoLoop ? "is-looping" : "",
+        ].filter(Boolean).join(" ")}
+      >
         <div ref={artContainerRef} className="lb-artplayer" />
       </div>
     );
@@ -356,8 +398,17 @@ function SlideImage({ image, alt, onDims, active, autoRotate }) {
  *   currentIndex  — index of the currently displayed image
  *   onClose       — called when the user dismisses the lightbox
  *   onNavigate    — called with a new index when the user navigates
+ *   videoMuted    — start the lightbox player muted
+ *   videoLoop     — loop the current video when it ends
  */
-export default function Lightbox({ images, currentIndex, onClose, onNavigate }) {
+export default function Lightbox({
+  images,
+  currentIndex,
+  onClose,
+  onNavigate,
+  videoMuted = false,
+  videoLoop = false,
+}) {
   const image = images[currentIndex];
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < images.length - 1;
@@ -596,6 +647,8 @@ export default function Lightbox({ images, currentIndex, onClose, onNavigate }) 
                   getMediaType(img.key) === "video" &&
                   (dimsMap[img.key]?.w ?? 0) > (dimsMap[img.key]?.h ?? 0)
                 }
+                videoMuted={videoMuted}
+                videoLoop={videoLoop}
                 onDims={(w, h) =>
                   setDimsMap((prev) => ({ ...prev, [img.key]: { w, h } }))
                 }
