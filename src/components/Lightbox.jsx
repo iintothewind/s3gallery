@@ -261,6 +261,7 @@ function SlideImage({ image, alt, onDims, active, autoRotate, videoMuted, videoL
       return;
     }
     artRef.current = player;
+    player.isRotate = Boolean(autoRotate);
 
     player.on("ready", () => {
       const v = player.video;
@@ -288,8 +289,21 @@ function SlideImage({ image, alt, onDims, active, autoRotate, videoMuted, videoL
         artRef.current = null;
       }
     };
+    // autoRotate is applied in a separate effect so toggling the CSS
+    // transpose does not destroy and recreate the player.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageKey, active, videoMuted, videoLoop]);
+
+  // Keep ArtPlayer's gesture axes in sync with the CSS 90° transpose
+  // (vertical swipe seeks along the landscape timeline). Also emit
+  // resize so the player picks up the transposed box once dimensions
+  // arrive and .is-video-auto-rotated is applied.
+  useEffect(() => {
+    const player = artRef.current;
+    if (!isVideo || !active || !player) return;
+    player.isRotate = Boolean(autoRotate);
+    try { player.emit("resize"); } catch {}
+  }, [autoRotate, active, isVideo]);
 
   if (!isVideo && !blobUrl) {
     const progressText = progress.percent === null
@@ -387,7 +401,8 @@ function SlideImage({ image, alt, onDims, active, autoRotate, videoMuted, videoL
  * and touch swipe gestures via Swiper.js:
  *   swipe left  (right→left) → next image
  *   swipe right (left→right) → previous image
- *   swipe up    (down→up)    → close
+ *   swipe up    (down→up)    → close (disabled while the image or
+ *                 landscape video is rotated, so a seek/pan is not a close)
  *
  * Uses Swiper's Virtual module so only ~5 slides are ever in the DOM.
  * Each slide loads its image as a Blob URL (see SlideImage above) so
@@ -432,6 +447,10 @@ export default function Lightbox({
     currentMediaType !== "video";
   const canAutoRotateLandscapeVideo =
     isMobileViewport() && viewportOrientation === "portrait";
+  const isVideoAutoRotated =
+    canAutoRotateLandscapeVideo &&
+    currentMediaType === "video" &&
+    (currentDims?.w ?? 0) > (currentDims?.h ?? 0);
 
   // Copy-original-URL feedback state for the caption filename.
   const [copyState, setCopyState] = useState("idle"); // idle | ok | fail
@@ -441,9 +460,11 @@ export default function Lightbox({
     ? (image.size / (1024 * 1024)).toFixed(1) + " MB"
     : null;
 
-  // Stable ref to onClose — lets the touch effect run once without stale closures.
+  // Stable refs for the swipe-up-to-close effect (attached once).
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const allowSwipeUpCloseRef = useRef(true);
+  allowSwipeUpCloseRef.current = !isImageRotated && !isVideoAutoRotated;
 
   // Copy the full original S3 URL (not the lightbox blob URL) on click/tap.
   const copyOriginalUrl = useCallback(async () => {
@@ -544,6 +565,7 @@ export default function Lightbox({
     };
 
     const onTouchEnd = (e) => {
+      if (!allowSwipeUpCloseRef.current) return;
       const t = e.changedTouches[0];
       const dx = Math.abs(t.clientX - startX);
       const dy = startY - t.clientY; // positive = finger moved upward

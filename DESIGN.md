@@ -103,8 +103,14 @@ letterbox, which also plays well with the rotate button.
 - **Landscape video auto-rotate.** On a coarse/touch portrait viewport, a
   video whose own stored dimensions are wider than tall gets
   `.is-video-auto-rotated` (layout box `100dvh × 100dvw`, then `rotate(90deg)`).
-  Rotation is computed per slide from that slide's dimensions so a neighboring
-  portrait video is not rotated during a swipe.
+  The wrap is `flex-shrink: 0` so the portrait slide cannot squeeze that box,
+  and ArtPlayer fills it with `object-fit: contain` — the control bar overlays
+  the picture instead of shrinking it. Rotation is computed per slide from that
+  slide's dimensions so a neighboring portrait video is not rotated during a
+  swipe.
+- **Swipe-up to close.** A vertical swipe-up dismisses the lightbox only while
+  the current image or video is not rotated. After an image rotate or landscape
+  video auto-rotate, the gesture is ignored so a seek or pan is not a close.
 - **Video mute / loop vs grid tiles.** Grid tiles always use a muted, paused
   `<video>` only to capture a first-frame thumbnail. Toolbar Mute/Loop do not
   apply there.

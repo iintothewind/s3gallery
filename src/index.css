@@ -435,13 +435,16 @@ code   { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
      max-width: 84vh / max-height: 90vw caps shrank this box before the
      rotation, so the rotated image ended up far smaller than the screen.
      dvh/dvw follow the dynamic viewport on mobile browsers; vh/vw are the
-     fallback for engines without dynamic-viewport units. */
+     fallback for engines without dynamic-viewport units.
+     flex-shrink: 0 keeps the slide's flex layout from squeezing this box
+     back down to the portrait slide width. */
   width: 100vh;
   width: 100dvh;
   height: 100vw;
   height: 100dvw;
   max-width: none;
   max-height: none;
+  flex-shrink: 0;
   transform: rotate(90deg);
 }
 
@@ -509,20 +512,54 @@ code   { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
 /* Auto-rotate a landscape video into landscape view when the phone is held
    vertically. Same transpose trick as the image rotate: swap the layout box
    to the viewport turned on its side so object-fit/contain fills the whole
-   screen after rotate(90deg). dvh/dvw are the mobile dynamic units; vh/vw the
-   fallback for engines without them. */
+   screen after rotate(90deg). The wrap (a div) is rotated rather than the
+   <video> itself because iOS often ignores CSS transforms on video elements.
+   dvh/dvw are the mobile dynamic units; vh/vw the fallback.
+   The wrap is a flex item of .swiper-slide. Without flex-shrink: 0, the
+   100dvh width collapses to the portrait slide width and ArtPlayer's
+   control bar then consumes a large fraction of the remaining short edge —
+   the rotated video looks smaller than a rotated image of the same ratio.
+   The player is pinned with inset: 0 so it cannot shrink-wrap to
+   "video + controls". The bar is an overlay and must not reduce the
+   video's object-fit box. */
 .lb-video-wrap.is-video-auto-rotated {
   width: 100vh;
   width: 100dvh;
   height: 100vw;
   height: 100dvw;
+  min-width: 100vh;
+  min-width: 100dvh;
+  min-height: 100vw;
+  min-height: 100dvw;
+  max-width: none;
+  max-height: none;
+  flex-shrink: 0;
   transform: rotate(90deg);
   transform-origin: center;
 }
 
 .lb-artplayer {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
+}
+
+.lb-video-wrap .art-video {
+  object-fit: contain;
+}
+
+.lb-video-wrap.is-video-auto-rotated .art-video {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.lb-video-wrap.is-video-auto-rotated .art-video-player {
+  /* Default --art-bottom-height is 100px; on the transposed short edge
+     (~phone width) that gradient looks like a reserved control strip. */
+  --art-bottom-height: 56px;
 }
 
 /* Let ArtPlayer's own controls inherit the lightbox's overall dark backdrop. */
